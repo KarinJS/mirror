@@ -1,0 +1,10 @@
+{
+  "karinjs": {
+    "karin": [
+      {
+        "branch": "HEAD",
+        "file": "package.json"
+      }
+    ]
+  }
+}

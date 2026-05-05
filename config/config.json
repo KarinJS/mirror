@@ -1,0 +1,42 @@
+{
+  "host": "0.0.0.0",
+  "port": 7878,
+  "publicOrigin": "https://mirror.karinjs.com",
+  "trustProxyHeaders": true,
+  "logLevel": "info",
+  "geo": {
+    "mode": "off",
+    "headerName": "EO-Client-IPCountry",
+    "countries": ["CN"]
+  },
+  "cacheTTL": {
+    "raw": 300,
+    "avatar": 300,
+    "unpkg": 300
+  },
+  "mirror": {
+    "defaultTTL": 0,
+    "defaultMaxSize": 52428800,
+    "absoluteMaxSize": 1073741824,
+    "fetchTimeoutMs": 30000
+  },
+  "cors": {
+    "enabledRoutes": ["raw", "unpkg", "mirror"]
+  },
+  "auth": {
+    "enabled": false,
+    "key": "",
+    "value": ""
+  },
+  "configSync": {
+    "enabled": false,
+    "intervalSeconds": 300,
+    "urls": {
+      "avatar": "",
+      "raw": "",
+      "releases": "",
+      "mirror": "",
+      "unpkg": ""
+    }
+  }
+}

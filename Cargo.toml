@@ -1,0 +1,30 @@
+[package]
+name = "mirror"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "fs"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "gzip", "rustls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+anyhow = "1.0"
+thiserror = "2.0"
+notify = "8.2"
+futures = "0.3"
+bytes = "1.11"
+http = "1.4"
+mime_guess = "2.0"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

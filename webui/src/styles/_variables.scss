@@ -1,0 +1,118 @@
+// ── Typography ─────────────────────────────────────────────────────────────
+$font-sans:  'Inter', 'Noto Sans SC', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+$font-mono:  'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+$font-display: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+
+// ── Palette (CSS-var aliases) ──────────────────────────────────────────────
+$bg-base:    var(--bg-base);
+$bg-surface: var(--bg-surface);
+$bg-raised:  var(--bg-raised);
+$bg-hover:   var(--bg-hover);
+$bg-input:   var(--bg-input);
+
+$accent:        var(--accent);
+$accent-strong: var(--accent-strong);
+$accent-light:  var(--accent-light);
+$accent-dim:    var(--accent-dim);
+$accent-glow:   var(--accent-glow);
+
+$aurora-1: var(--aurora-1);
+$aurora-2: var(--aurora-2);
+$aurora-3: var(--aurora-3);
+
+$green:       var(--green);
+$green-dim:   var(--green-dim);
+$cyan:        var(--cyan);
+$orange:      var(--orange);
+$rose:        var(--rose);
+$violet:      var(--violet);
+
+$error:        var(--error);
+$error-dim:    var(--error-dim);
+$error-border: var(--error-border);
+
+// ── Text ───────────────────────────────────────────────────────────────────
+$text-primary:   var(--text-primary);
+$text-secondary: var(--text-secondary);
+$text-muted:     var(--text-muted);
+$text-code:      var(--text-code);
+
+// ── Borders ────────────────────────────────────────────────────────────────
+$border:        var(--border);
+$border-hover:  var(--border-hover);
+$border-focus:  var(--border-focus);
+$border-accent: var(--border-accent);
+
+// ── Grid ───────────────────────────────────────────────────────────────────
+$grid-color: var(--grid-color);
+$grid-size:  56px;
+
+// ── Effects ────────────────────────────────────────────────────────────────
+$shadow-soft:   var(--shadow-soft);
+$shadow-strong: var(--shadow-strong);
+$shadow-glow:   var(--shadow-glow);
+$glass-highlight: var(--glass-highlight);
+$glass-stroke:    var(--glass-stroke);
+$glass-edge:      var(--glass-edge);
+$glass-blur:      36px;
+$glass-blur-strong: 48px;
+
+// ── Radius ─────────────────────────────────────────────────────────────────
+$radius-xs:   6px;
+$radius-sm:   8px;
+$radius-md:   12px;
+$radius-lg:   16px;
+$radius-xl:   22px;
+$radius-2xl:  30px;
+$radius-pill: 999px;
+
+// ── Transitions ────────────────────────────────────────────────────────────
+$t-fast:   140ms cubic-bezier(0.4, 0, 0.2, 1);
+$t-base:   240ms cubic-bezier(0.32, 0.72, 0, 1);
+$t-smooth: 420ms cubic-bezier(0.32, 0.72, 0, 1);
+$t-spring: 600ms cubic-bezier(0.16, 1, 0.3, 1);
+
+// ── Mixins ─────────────────────────────────────────────────────────────────
+
+@mixin glass-card {
+  position: relative;
+  overflow: hidden;
+  background: $bg-surface;
+  border: 1px solid $glass-stroke;
+  border-radius: $radius-xl;
+  backdrop-filter: blur($glass-blur) saturate(140%);
+  -webkit-backdrop-filter: blur($glass-blur) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 $glass-highlight,
+    $shadow-soft;
+  transition:
+    border-color $t-base,
+    box-shadow   $t-base,
+    transform    $t-base,
+    background   $t-base;
+}
+
+@mixin card { @include glass-card; }
+
+@mixin glass-card-hover {
+  border-color: $border-hover;
+  box-shadow:
+    inset 0 1px 0 $glass-edge,
+    $shadow-strong;
+}
+
+@mixin focus-ring {
+  outline: none;
+  box-shadow:
+    0 0 0 1px rgba(var(--bg-base-rgb), 0.85),
+    0 0 0 4px $border-accent,
+    0 14px 40px $accent-glow;
+}
+
+@mixin text-gradient($from, $to) {
+  background: linear-gradient(135deg, $from 0%, $to 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
