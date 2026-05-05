@@ -7,7 +7,38 @@ env:
   APP_NAME: mirror
 
 jobs:
+  build_webui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+
+      - name: 设置 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建 WebUI
+        run: pnpm --filter webui build
+
+      - name: 上传 WebUI 产物
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: webui-dist
+          path: webui/dist/
+
   build_windows:
+    needs: [build_webui]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -39,14 +70,33 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.platform.target }}
 
+      - name: 下载 WebUI 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui-dist/
+
+      - name: 打包发布文件
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.platform.target }}"
+          $label = "${{ matrix.platform.label }}"
+          $tmp = "pkg_tmp"
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          New-Item -ItemType Directory -Force "$tmp/webui" | Out-Null
+          Copy-Item "target/$target/release/${{ env.APP_NAME }}.exe" "$tmp/"
+          Copy-Item -Recurse webui-dist/* "$tmp/webui/"
+          Compress-Archive -Path "$tmp/*" -DestinationPath "${{ env.APP_NAME }}-$label.zip"
+          Remove-Item -Recurse -Force $tmp
+
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "${{ env.APP_NAME }}-${{ matrix.platform.target }}"
-          path: |
-            target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}.exe
+          name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.zip"
 
   build_macos:
+    needs: [build_webui]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -77,14 +127,30 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.platform.target }}
 
+      - name: 下载 WebUI 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui-dist/
+
+      - name: 打包发布文件
+        run: |
+          label="${{ matrix.platform.label }}"
+          target="${{ matrix.platform.target }}"
+          mkdir -p pkg_tmp/webui
+          cp "target/${target}/release/${{ env.APP_NAME }}" pkg_tmp/
+          cp -r webui-dist/. pkg_tmp/webui/
+          tar -czf "${{ env.APP_NAME }}-${label}.tar.gz" -C pkg_tmp .
+          rm -rf pkg_tmp
+
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "${{ env.APP_NAME }}-${{ matrix.platform.target }}"
-          path: |
-            target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}
+          name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.tar.gz"
 
   build_linux:
+    needs: [build_webui]
     runs-on: ${{ matrix.platform.runner }}
     container: ${{ matrix.platform.container }}
     strategy:
@@ -116,9 +182,24 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.platform.target }}
 
+      - name: 下载 WebUI 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui-dist/
+
+      - name: 打包发布文件
+        run: |
+          label="${{ matrix.platform.label }}"
+          target="${{ matrix.platform.target }}"
+          mkdir -p pkg_tmp/webui
+          cp "target/${target}/release/${{ env.APP_NAME }}" pkg_tmp/
+          cp -r webui-dist/. pkg_tmp/webui/
+          tar -czf "${{ env.APP_NAME }}-${label}.tar.gz" -C pkg_tmp .
+          rm -rf pkg_tmp
+
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: "${{ env.APP_NAME }}-${{ matrix.platform.target }}"
-          path: |
-            target/${{ matrix.platform.target }}/release/${{ env.APP_NAME }}
+          name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.tar.gz"

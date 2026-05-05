@@ -115,63 +115,43 @@ pub async fn resolve_upstream_url(
     target: &str,
     timeout: Duration,
 ) -> AppResult<String> {
-    let mut current = target.to_string();
+    let mut req_builder = client.head(target).timeout(timeout);
+    for header_name in FORWARD_REQ_HEADERS {
+        if let Some(value) = req_headers.get(*header_name) {
+            req_builder = req_builder.header(*header_name, value);
+        }
+    }
 
-    for _ in 0..10 {
-        let mut req_builder = client.head(&current).timeout(timeout);
+    let upstream = req_builder.send().await.map_err(|e| {
+        warn!("upstream resolve failed: {} - {}", target, e);
+        if e.is_timeout() {
+            AppError::GatewayTimeout
+        } else {
+            AppError::BadGateway
+        }
+    })?;
 
+    // Some servers don't support HEAD; fall back to GET
+    if upstream.status() == StatusCode::METHOD_NOT_ALLOWED {
+        let mut get_req = client.get(target).timeout(timeout);
         for header_name in FORWARD_REQ_HEADERS {
             if let Some(value) = req_headers.get(*header_name) {
-                req_builder = req_builder.header(*header_name, value);
+                get_req = get_req.header(*header_name, value);
             }
         }
-
-        let upstream = req_builder.send().await.map_err(|e| {
-            warn!("upstream resolve failed: {} - {}", current, e);
+        let upstream = get_req.send().await.map_err(|e| {
+            warn!("upstream resolve (GET) failed: {} - {}", target, e);
             if e.is_timeout() {
                 AppError::GatewayTimeout
             } else {
                 AppError::BadGateway
             }
         })?;
-
-        if upstream.status() == StatusCode::METHOD_NOT_ALLOWED {
-            let mut get_req = client.get(&current).timeout(timeout);
-            for header_name in FORWARD_REQ_HEADERS {
-                if let Some(value) = req_headers.get(*header_name) {
-                    get_req = get_req.header(*header_name, value);
-                }
-            }
-            let upstream = get_req.send().await.map_err(|e| {
-                warn!("upstream resolve (GET) failed: {} - {}", current, e);
-                if e.is_timeout() {
-                    AppError::GatewayTimeout
-                } else {
-                    AppError::BadGateway
-                }
-            })?;
-
-            if let Some(location) = upstream.headers().get("location") {
-                if is_redirect_status(upstream.status()) {
-                    current = location.to_str().unwrap_or(&current).to_string();
-                    continue;
-                }
-            }
-            return Ok(current);
-        }
-
-        if let Some(location) = upstream.headers().get("location") {
-            if is_redirect_status(upstream.status()) {
-                current = location.to_str().unwrap_or(&current).to_string();
-                continue;
-            }
-        }
-
-        return Ok(current);
+        return Ok(upstream.url().to_string());
     }
 
-    warn!("upstream redirect loop: {}", target);
-    Err(AppError::BadGateway)
+    // response.url() is the final URL after reqwest has followed all redirects
+    Ok(upstream.url().to_string())
 }
 
 fn apply_ttl(headers: &mut HeaderMap, ttl: i32, upstream_headers: &HeaderMap) {
@@ -203,13 +183,70 @@ fn apply_ttl(headers: &mut HeaderMap, ttl: i32, upstream_headers: &HeaderMap) {
     );
 }
 
-fn is_redirect_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::MOVED_PERMANENTLY
-            | StatusCode::FOUND
-            | StatusCode::SEE_OTHER
-            | StatusCode::TEMPORARY_REDIRECT
-            | StatusCode::PERMANENT_REDIRECT
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_ttl_immutable() {
+        let mut headers = HeaderMap::new();
+        let upstream = HeaderMap::new();
+        apply_ttl(&mut headers, -1, &upstream);
+        assert_eq!(
+            headers.get("cache-control").unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn test_apply_ttl_no_store_strips_validators() {
+        let mut headers = HeaderMap::new();
+        headers.insert("etag", HeaderValue::from_static("\"abc123\""));
+        headers.insert(
+            "last-modified",
+            HeaderValue::from_static("Thu, 01 Jan 2026 00:00:00 GMT"),
+        );
+        let upstream = HeaderMap::new();
+        apply_ttl(&mut headers, 0, &upstream);
+        assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+        assert!(headers.get("etag").is_none(), "etag must be stripped");
+        assert!(
+            headers.get("last-modified").is_none(),
+            "last-modified must be stripped"
+        );
+    }
+
+    #[test]
+    fn test_apply_ttl_positive() {
+        let mut headers = HeaderMap::new();
+        let upstream = HeaderMap::new();
+        apply_ttl(&mut headers, 300, &upstream);
+        assert_eq!(headers.get("cache-control").unwrap(), "public, max-age=300");
+    }
+
+    #[test]
+    fn test_apply_ttl_passthrough_from_upstream() {
+        let mut headers = HeaderMap::new();
+        let mut upstream = HeaderMap::new();
+        upstream.insert(
+            "cache-control",
+            HeaderValue::from_static("max-age=3600, public"),
+        );
+        upstream.insert("etag", HeaderValue::from_static("\"xyz\""));
+        apply_ttl(&mut headers, -2, &upstream);
+        assert_eq!(
+            headers.get("cache-control").unwrap(),
+            "max-age=3600, public"
+        );
+        assert_eq!(headers.get("etag").unwrap(), "\"xyz\"");
+    }
+
+    #[test]
+    fn test_apply_ttl_passthrough_missing_upstream_headers() {
+        let mut headers = HeaderMap::new();
+        let upstream = HeaderMap::new(); // no cache-control or etag
+        apply_ttl(&mut headers, -2, &upstream);
+        assert!(headers.get("cache-control").is_none());
+        assert!(headers.get("etag").is_none());
+    }
 }

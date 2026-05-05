@@ -79,7 +79,6 @@ pub async fn run() -> anyhow::Result<()> {
     let state = AppState::load().await?;
     let stats = Stats::new();
     let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let sync_client = reqwest::Client::builder().build()?;
