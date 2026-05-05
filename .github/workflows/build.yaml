@@ -17,12 +17,12 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
 
       - name: 设置 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
       - name: 设置 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -73,7 +73,7 @@ jobs:
           cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 下载 WebUI 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: webui-dist
           path: webui-dist/
@@ -126,7 +126,7 @@ jobs:
           cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 下载 WebUI 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: webui-dist
           path: webui-dist/
@@ -180,7 +180,7 @@ jobs:
           cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 下载 WebUI 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: webui-dist
           path: webui-dist/
