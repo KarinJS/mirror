@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 下载构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: "${{ env.APP_NAME }}-*"
           merge-multiple: true
@@ -28,15 +28,20 @@ jobs:
       - name: 打包发布文件
         shell: bash
         run: |
+          shopt -s nullglob
           cd artifacts
+          echo "=== artifacts 目录内容 ==="
+          ls -laR
           for d in "${{ env.APP_NAME }}"-*/; do
             name="${d%/}"
+            echo "打包: ${name}"
             if [[ "$name" == *windows* ]]; then
               (cd "$name" && zip -r "../${name}.zip" .)
             else
               tar -czf "${name}.tar.gz" -C "$name" .
             fi
           done
+          echo "=== 最终产物 ==="
           ls -la
 
       - name: 上传主程序 Release
