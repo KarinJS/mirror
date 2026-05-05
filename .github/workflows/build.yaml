@@ -82,20 +82,16 @@ jobs:
         shell: pwsh
         run: |
           $target = "${{ matrix.platform.target }}"
-          $label = "${{ matrix.platform.label }}"
-          $tmp = "pkg_tmp"
-          New-Item -ItemType Directory -Force $tmp | Out-Null
-          New-Item -ItemType Directory -Force "$tmp/webui" | Out-Null
-          Copy-Item "target/$target/release/${{ env.APP_NAME }}.exe" "$tmp/"
-          Copy-Item -Recurse webui-dist/* "$tmp/webui/"
-          Compress-Archive -Path "$tmp/*" -DestinationPath "${{ env.APP_NAME }}-$label.zip"
-          Remove-Item -Recurse -Force $tmp
+          $pkg = "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
+          New-Item -ItemType Directory -Force "$pkg/webui" | Out-Null
+          Copy-Item "target/$target/release/${{ env.APP_NAME }}.exe" "$pkg/"
+          Copy-Item -Recurse webui-dist/* "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
-          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.zip"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}/"
 
   build_macos:
     needs: [build_webui]
@@ -139,17 +135,16 @@ jobs:
         run: |
           label="${{ matrix.platform.label }}"
           target="${{ matrix.platform.target }}"
-          mkdir -p pkg_tmp/webui
-          cp "target/${target}/release/${{ env.APP_NAME }}" pkg_tmp/
-          cp -r webui-dist/. pkg_tmp/webui/
-          tar -czf "${{ env.APP_NAME }}-${label}.tar.gz" -C pkg_tmp .
-          rm -rf pkg_tmp
+          pkg="${{ env.APP_NAME }}-${label}"
+          mkdir -p "$pkg/webui"
+          cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
+          cp -r webui-dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
-          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.tar.gz"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}/"
 
   build_linux:
     needs: [build_webui]
@@ -194,17 +189,16 @@ jobs:
         run: |
           label="${{ matrix.platform.label }}"
           target="${{ matrix.platform.target }}"
-          mkdir -p pkg_tmp/webui
-          cp "target/${target}/release/${{ env.APP_NAME }}" pkg_tmp/
-          cp -r webui-dist/. pkg_tmp/webui/
-          tar -czf "${{ env.APP_NAME }}-${label}.tar.gz" -C pkg_tmp .
-          rm -rf pkg_tmp
+          pkg="${{ env.APP_NAME }}-${label}"
+          mkdir -p "$pkg/webui"
+          cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
+          cp -r webui-dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
-          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.tar.gz"
+          path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}/"
 
   summary:
     needs: [build_windows, build_macos, build_linux]
@@ -218,12 +212,13 @@ jobs:
 
           | 产物 | 适用系统 |
           | --- | --- |
-          | **mirror-windows-x64.zip** | Windows 10/11 x64 — 绝大多数 Windows 电脑 (Intel / AMD) |
-          | **mirror-windows-arm64.zip** | Windows on ARM — Surface Pro X、骁龙本等 ARM 设备 |
-          | **mirror-macos-x64.tar.gz** | Intel 芯片的 Mac |
-          | **mirror-macos-arm64.tar.gz** | Apple Silicon Mac (M1 / M2 / M3 / M4) |
-          | **mirror-linux-x64.tar.gz** | 大多数 Linux 发行版 x64 (Intel / AMD) |
-          | **mirror-linux-arm64.tar.gz** | ARM Linux — 树莓派 4/5、ARM 服务器等 |
+          | **mirror-windows-x64** | Windows 10/11 x64 — 绝大多数 Windows 电脑 (Intel / AMD) |
+          | **mirror-windows-arm64** | Windows on ARM — Surface Pro X、骁龙本等 ARM 设备 |
+          | **mirror-macos-x64** | Intel 芯片的 Mac |
+          | **mirror-macos-arm64** | Apple Silicon Mac (M1 / M2 / M3 / M4) |
+          | **mirror-linux-x64** | 大多数 Linux 发行版 x64 (Intel / AMD) |
+          | **mirror-linux-arm64** | ARM Linux — 树莓派 4/5、ARM 服务器等 |
 
-          > 如果不确定，x64 是默认选择。在"设置 → 系统 → 关于"中查看"系统类型"可以确认。
+          > 如果不确定，x64 是默认选择。下载后解压即可直接运行，无需二次解压。
+          > 在"设置 → 系统 → 关于"中查看"系统类型"可以确认架构。
           EOF

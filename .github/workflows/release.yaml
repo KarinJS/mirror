@@ -25,9 +25,25 @@ jobs:
           merge-multiple: true
           path: ./artifacts/
 
+      - name: 打包发布文件
+        shell: bash
+        run: |
+          cd artifacts
+          for d in "${{ env.APP_NAME }}"-*/; do
+            name="${d%/}"
+            if [[ "$name" == *windows* ]]; then
+              (cd "$name" && zip -r "../${name}.zip" .)
+            else
+              tar -czf "${name}.tar.gz" -C "$name" .
+            fi
+          done
+          ls -la
+
       - name: 上传主程序 Release
         if: ${{ steps.get-tag.outputs.puniyu_tag }}
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          files: artifacts/${{ env.APP_NAME }}-*
+          files: |
+            artifacts/${{ env.APP_NAME }}-*.zip
+            artifacts/${{ env.APP_NAME }}-*.tar.gz
           tag_name: ${{ steps.get-tag.outputs.puniyu_tag }}
