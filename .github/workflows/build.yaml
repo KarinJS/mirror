@@ -47,10 +47,10 @@ jobs:
         platform:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
-            label: windows-x86_64
+            label: windows-x64
           - runner: windows-latest
             target: aarch64-pc-windows-msvc
-            label: windows-aarch64
+            label: windows-arm64
 
 
     steps:
@@ -105,10 +105,10 @@ jobs:
         platform:
           - runner: macos-latest
             target: x86_64-apple-darwin
-            label: macos-x86_64
+            label: macos-x64
           - runner: macos-latest
             target: aarch64-apple-darwin
-            label: macos-aarch64
+            label: macos-arm64
 
     steps:
       - name: 检出仓库
@@ -160,10 +160,10 @@ jobs:
         platform:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            label: linux-x86_64
+            label: linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            label: linux-aarch64
+            label: linux-arm64
 
     steps:
       - name: 检出仓库
@@ -205,3 +205,25 @@ jobs:
         with:
           name: "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
           path: "${{ env.APP_NAME }}-${{ matrix.platform.label }}.tar.gz"
+
+  summary:
+    needs: [build_windows, build_macos, build_linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载指引
+        shell: bash
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 构建产物下载指引
+
+          | 产物 | 适用系统 |
+          | --- | --- |
+          | **mirror-windows-x64.zip** | Windows 10/11 x64 — 绝大多数 Windows 电脑 (Intel / AMD) |
+          | **mirror-windows-arm64.zip** | Windows on ARM — Surface Pro X、骁龙本等 ARM 设备 |
+          | **mirror-macos-x64.tar.gz** | Intel 芯片的 Mac |
+          | **mirror-macos-arm64.tar.gz** | Apple Silicon Mac (M1 / M2 / M3 / M4) |
+          | **mirror-linux-x64.tar.gz** | 大多数 Linux 发行版 x64 (Intel / AMD) |
+          | **mirror-linux-arm64.tar.gz** | ARM Linux — 树莓派 4/5、ARM 服务器等 |
+
+          > 如果不确定，x64 是默认选择。在"设置 → 系统 → 关于"中查看"系统类型"可以确认。
+          EOF
