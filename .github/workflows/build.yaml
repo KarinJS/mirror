@@ -208,17 +208,51 @@ jobs:
         shell: bash
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 构建产物下载指引
+          ## 下载指引
 
           | 产物 | 适用系统 |
           | --- | --- |
-          | **mirror-windows-x64** | Windows 10/11 x64 — 绝大多数 Windows 电脑 (Intel / AMD) |
-          | **mirror-windows-arm64** | Windows on ARM — Surface Pro X、骁龙本等 ARM 设备 |
+          | **mirror-windows-x64** | Windows 10 / 11 标准版，绝大多数 Intel / AMD 电脑 |
+          | **mirror-windows-arm64** | Windows ARM 设备（Surface Pro X、骁龙笔记本等） |
           | **mirror-macos-x64** | Intel 芯片的 Mac |
-          | **mirror-macos-arm64** | Apple Silicon Mac (M1 / M2 / M3 / M4) |
-          | **mirror-linux-x64** | 大多数 Linux 发行版 x64 (Intel / AMD) |
-          | **mirror-linux-arm64** | ARM Linux — 树莓派 4/5、ARM 服务器等 |
+          | **mirror-macos-arm64** | Apple Silicon 芯片的 Mac（M1 / M2 / M3 / M4） |
+          | **mirror-linux-x64** | 主流 x64 架构的 Linux 发行版 |
+          | **mirror-linux-arm64** | ARM 架构的 Linux（树莓派 4 / 5、ARM 云服务器等） |
 
-          > 如果不确定，x64 是默认选择。下载后解压即可直接运行，无需二次解压。
-          > 在"设置 → 系统 → 关于"中查看"系统类型"可以确认架构。
+          > 如果不确定选哪个，下载 x64 版本即可。进入系统「设置 → 系统 → 关于」可以查看架构类型。
+
+          ## 使用方法
+
+          ### Windows
+
+          解压 zip 后双击 `mirror.exe` 或在终端中运行：
+
+          ```powershell
+          Expand-Archive mirror-windows-x64.zip
+          cd mirror-windows-x64
+          .\mirror.exe
+          ```
+
+          ### macOS
+
+          解压后先移除隔离属性再启动：
+
+          ```bash
+          tar -xzf mirror-macos-x64.tar.gz
+          cd mirror-macos-x64
+          xattr -d com.apple.quarantine mirror
+          chmod +x mirror
+          ./mirror
+          ```
+
+          ### Linux
+
+          解压后给二进制文件执行权限，然后启动：
+
+          ```bash
+          tar -xzf mirror-linux-x64.tar.gz
+          cd mirror-linux-x64
+          chmod +x mirror
+          ./mirror
+          ```
           EOF
