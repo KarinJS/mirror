@@ -165,7 +165,7 @@ async fn generate_defaults(config_root: &Path) -> Result<()> {
             "headerName": "EO-Client-IPCountry",
             "countries": ["CN"]
         },
-        "cacheTTL": { "raw": 300, "avatar": 300, "unpkg": 300 },
+        "cacheTTL": { "raw": 300, "avatar": -2, "unpkg": 300 },
         "mirror": {
             "defaultTTL": 0,
             "defaultMaxSize": 52428800,
