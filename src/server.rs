@@ -109,7 +109,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let serve_dir = ServiceBuilder::new()
         .layer(layer_fn(|inner| AssetCache { inner }))
-        .service(ServeDir::new("webui/dist"));
+        .service(ServeDir::new("webui"));
 
     let app = Router::new()
         .route("/healthz", get(healthz))

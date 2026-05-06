@@ -6,7 +6,7 @@
     "dev": "concurrently \"cargo watch -x run\" \"pnpm --filter webui dev\"",
     "dev:backend": "cargo watch -x run",
     "dev:frontend": "pnpm --filter webui dev",
-    "build": "pnpm run build:backend && pnpm run build:frontend && node -e \"fs=require('fs'),fs.rmSync('target/release/webui/dist',{recursive:true,force:true}),fs.cpSync('webui/dist','target/release/webui/dist',{recursive:true})\"",
+    "build": "pnpm run build:backend && pnpm run build:frontend && node -e \"fs=require('fs'),fs.rmSync('target/release/webui',{recursive:true,force:true}),fs.cpSync('webui/dist','target/release/webui',{recursive:true})\"",
     "build:backend": "cargo build --release",
     "build:frontend": "pnpm --filter webui typecheck && pnpm --filter webui build",
     "typecheck": "pnpm --filter webui typecheck",

@@ -83,9 +83,9 @@ jobs:
         run: |
           $target = "${{ matrix.platform.target }}"
           $pkg = "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
-          New-Item -ItemType Directory -Force "$pkg/webui/dist" | Out-Null
+          New-Item -ItemType Directory -Force "$pkg/webui" | Out-Null
           Copy-Item "target/$target/release/${{ env.APP_NAME }}.exe" "$pkg/"
-          Copy-Item -Recurse webui-dist/* "$pkg/webui/dist/"
+          Copy-Item -Recurse webui-dist/* "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -136,9 +136,9 @@ jobs:
           label="${{ matrix.platform.label }}"
           target="${{ matrix.platform.target }}"
           pkg="${{ env.APP_NAME }}-${label}"
-          mkdir -p "$pkg/webui/dist"
+          mkdir -p "$pkg/webui"
           cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
-          cp -r webui-dist/. "$pkg/webui/dist/"
+          cp -r webui-dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -190,9 +190,9 @@ jobs:
           label="${{ matrix.platform.label }}"
           target="${{ matrix.platform.target }}"
           pkg="${{ env.APP_NAME }}-${label}"
-          mkdir -p "$pkg/webui/dist"
+          mkdir -p "$pkg/webui"
           cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
-          cp -r webui-dist/. "$pkg/webui/dist/"
+          cp -r webui-dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
