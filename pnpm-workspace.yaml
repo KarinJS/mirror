@@ -1,2 +1,5 @@
 packages:
-  - 'webui'
+  - webui
+
+onlyBuiltDependencies:
+  - '@parcel/watcher'

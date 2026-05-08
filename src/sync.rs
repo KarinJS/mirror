@@ -44,7 +44,7 @@ impl WhitelistKind {
         }
     }
 
-    fn url<'a>(self, urls: &'a ConfigSyncUrls) -> &'a str {
+    fn url(self, urls: &ConfigSyncUrls) -> &str {
         match self {
             Self::Avatar => &urls.avatar,
             Self::Raw => &urls.raw,
@@ -276,7 +276,7 @@ pub async fn config_sync_task(state: AppState, client: Client) {
             tracing::debug!("config sync: disabled, sleeping");
         }
 
-        tokio::time::sleep(Duration::from_secs(interval_secs as u64)).await;
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
     }
 }
 

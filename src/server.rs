@@ -13,59 +13,22 @@ use axum::{
     routing::get,
     Router,
 };
-use http::{header, HeaderValue, Request, StatusCode};
+use http::StatusCode;
 use reqwest::Client;
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
-use tower::{layer::layer_fn, Service, ServiceBuilder};
+use tower::ServiceBuilder;
+#[cfg(debug_assertions)]
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, Span};
 
-async fn reject_query(req: axum::http::Request<axum::body::Body>, next: middleware::Next) -> impl IntoResponse {
+async fn reject_query(
+    req: axum::http::Request<axum::body::Body>,
+    next: middleware::Next,
+) -> impl IntoResponse {
     if req.uri().query().is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }
     next.run(req).await
-}
-
-/// Wraps a service to add immutable cache headers for hashed /assets/ files.
-#[derive(Clone)]
-struct AssetCache<S> {
-    inner: S,
-}
-
-impl<S, B> Service<Request<axum::body::Body>> for AssetCache<S>
-where
-    S: Service<Request<axum::body::Body>, Response = Response<B>> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-    B: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: Request<axum::body::Body>) -> Self::Future {
-        let cache = req.uri().path().starts_with("/assets/");
-        let mut inner = self.inner.clone();
-        Box::pin(async move {
-            let mut resp = inner.call(req).await?;
-            if cache {
-                resp.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=31536000, immutable"),
-                );
-            }
-            Ok(resp)
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -78,8 +41,7 @@ struct AppContext {
 pub async fn run() -> anyhow::Result<()> {
     let state = AppState::load().await?;
     let stats = Stats::new();
-    let client = Client::builder()
-        .build()?;
+    let client = Client::builder().build()?;
 
     let sync_client = reqwest::Client::builder().build()?;
 
@@ -96,8 +58,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     tokio::spawn(sync::config_sync_task(state, sync_client));
 
-    let access_log = TraceLayer::new_for_http()
-        .on_response(|resp: &Response<_>, latency: std::time::Duration, _span: &Span| {
+    let access_log = TraceLayer::new_for_http().on_response(
+        |resp: &Response<_>, latency: std::time::Duration, _span: &Span| {
             let status = resp.status().as_u16();
             let ms = latency.as_millis();
             if status >= 500 {
@@ -105,11 +67,8 @@ pub async fn run() -> anyhow::Result<()> {
             } else {
                 info!("{} {}ms", status, ms);
             }
-        });
-
-    let serve_dir = ServiceBuilder::new()
-        .layer(layer_fn(|inner| AssetCache { inner }))
-        .service(ServeDir::new("webui"));
+        },
+    );
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -120,15 +79,24 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/avatar/{*path}", get(avatar_handler))
         .route("/unpkg/{*path}", get(unpkg_handler))
         .route("/mirror/{*path}", get(mirror_handler))
-        .fallback_service(serve_dir)
         .layer(ServiceBuilder::new().layer(access_log))
         .layer(middleware::from_fn(reject_query))
         .with_state(ctx);
 
+    #[cfg(debug_assertions)]
+    let app = app.fallback_service(ServeDir::new("webui"));
+
+    #[cfg(not(debug_assertions))]
+    let app = app.fallback(static_handler);
+
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    let display_host = if host == "0.0.0.0" { "127.0.0.1" } else { &host };
+    let display_host = if host == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        &host
+    };
     let url = format!("http://{}:{}", display_host, port);
     let ver = env!("CARGO_PKG_VERSION");
 
@@ -181,7 +149,13 @@ async fn raw_handler(
 ) -> AppResult<Response> {
     ctx.stats.bump("raw").await;
     check_request(&ctx.state, &headers, uri.path()).await?;
-    routes::handle_raw(State(ctx.state), State(ctx.client), headers, uri.path().to_string()).await
+    routes::handle_raw(
+        State(ctx.state),
+        State(ctx.client),
+        headers,
+        uri.path().to_string(),
+    )
+    .await
 }
 
 async fn avatar_handler(
@@ -237,9 +211,7 @@ async fn check_request(state: &AppState, headers: &HeaderMap, _path: &str) -> Ap
 
     // Check auth header
     if config.auth.enabled {
-        let val = headers
-            .get(&config.auth.key)
-            .and_then(|v| v.to_str().ok());
+        let val = headers.get(&config.auth.key).and_then(|v| v.to_str().ok());
         if val != Some(&config.auth.value) {
             return Err(AppError::Unauthorized);
         }
@@ -252,4 +224,30 @@ async fn check_request(state: &AppState, headers: &HeaderMap, _path: &str) -> Ap
     }
 
     Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+async fn static_handler(uri: Uri) -> impl IntoResponse {
+    use http::header;
+    use rust_embed::RustEmbed;
+    #[derive(RustEmbed)]
+    #[folder = "webui/dist"]
+    struct Assets;
+
+    let path = uri
+        .path()
+        .trim_start_matches('/')
+        .strip_prefix("webui/")
+        .unwrap_or_else(|| uri.path().trim_start_matches('/'));
+
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match Assets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+
+            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
