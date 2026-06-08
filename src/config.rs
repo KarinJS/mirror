@@ -154,8 +154,6 @@ pub struct AppConfig {
     pub config_sync: ConfigSyncConfig,
     #[serde(rename = "originProtection", default)]
     pub origin_protection: OriginProtectionConfig,
-    #[serde(default)]
-    pub whitelists: Whitelists,
 }
 
 pub type AvatarWhitelist = Vec<String>;
@@ -204,15 +202,16 @@ pub struct AppState {
     pub whitelists: Arc<RwLock<Whitelists>>,
 }
 
-/// Name of the single merged config file holding both app settings and all
-/// whitelists.
-pub const CONFIG_FILE: &str = "config.mirror.json";
+/// App settings (host/port/auth/geo/cacheTTL/cors/configSync/originProtection).
+/// Private to each instance — may hold credentials, so it is gitignored.
+pub const APP_CONFIG_FILE: &str = "config.json";
 
-async fn generate_defaults(config_root: &Path) -> Result<()> {
-    debug!("config not found, generating defaults");
-    tokio::fs::create_dir_all(config_root).await?;
+/// All route whitelists (avatar/raw/releases/unpkg/mirror). Simple and
+/// shareable — this is the unit that config-sync pulls and that can be published.
+pub const WHITELISTS_FILE: &str = "config.mirror.json";
 
-    let config = serde_json::json!({
+fn default_app_config() -> serde_json::Value {
+    serde_json::json!({
         "host": "0.0.0.0",
         "port": 7878,
         "publicOrigin": "https://mirror.karinjs.com",
@@ -245,39 +244,57 @@ async fn generate_defaults(config_root: &Path) -> Result<()> {
             "secretKey": "",
             "intervalSeconds": 259200,
             "ports": [80, 443]
-        },
-        "whitelists": {
-            "avatar": ["karinjs"],
-            "raw": {
-                "karinjs": {
-                    "karin": [{"branch": "HEAD", "file": "package.json"}]
-                }
-            },
-            "releases": {
-                "NapNeko": {
-                    "NapCatQQ": ["NapCat.Framework.zip"]
-                }
-            },
-            "unpkg": {
-                "karin": ["package.json", "dist/karin.umd.js"]
-            },
-            "mirror": {
-                "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0
-            }
         }
-    });
+    })
+}
 
-    let text = serde_json::to_string_pretty(&config)?;
-    tokio::fs::write(config_root.join(CONFIG_FILE), text).await?;
-    debug!("default config generated");
+fn default_whitelists() -> serde_json::Value {
+    serde_json::json!({
+        "avatar": ["karinjs"],
+        "raw": {
+            "karinjs": {
+                "karin": [{"branch": "HEAD", "file": "package.json"}]
+            }
+        },
+        "releases": {
+            "NapNeko": {
+                "NapCatQQ": ["NapCat.Framework.zip"]
+            }
+        },
+        "unpkg": {
+            "karin": ["package.json", "dist/karin.umd.js"]
+        },
+        "mirror": {
+            "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0
+        }
+    })
+}
+
+/// Write any missing default config file. Existing files are left untouched, so
+/// a present `config.json` is never clobbered just because `config.mirror.json`
+/// is missing (or vice versa).
+async fn generate_defaults(config_root: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(config_root).await?;
+
+    let app_path = config_root.join(APP_CONFIG_FILE);
+    if !app_path.exists() {
+        debug!("{APP_CONFIG_FILE} not found, generating default");
+        tokio::fs::write(&app_path, serde_json::to_string_pretty(&default_app_config())?).await?;
+    }
+
+    let wl_path = config_root.join(WHITELISTS_FILE);
+    if !wl_path.exists() {
+        debug!("{WHITELISTS_FILE} not found, generating default");
+        tokio::fs::write(&wl_path, serde_json::to_string_pretty(&default_whitelists())?).await?;
+    }
 
     Ok(())
 }
 
-/// Parse a merged config document and run semantic validation on it.
+/// Parse the app-settings document (`config.json`) and run semantic validation.
 ///
-/// Shared by the initial load and the config-sync hot-reload path so both
-/// reject invalid documents identically.
+/// Shared by the initial load and any reload path so both reject invalid
+/// documents identically. Whitelists are NOT part of this document.
 pub fn parse_config(text: &str) -> Result<AppConfig> {
     let config: AppConfig = serde_json::from_str(text)?;
     validate_config(&config)?;
@@ -314,20 +331,22 @@ impl AppState {
         let config_root = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join("config");
-        let config_path = config_root.join(CONFIG_FILE);
 
-        if !config_path.is_file() {
-            generate_defaults(&config_root).await?;
-        }
+        // Create any missing default file (each handled independently).
+        generate_defaults(&config_root).await?;
 
-        let text = tokio::fs::read_to_string(&config_path)
+        // App settings ← config.json
+        let app_text = tokio::fs::read_to_string(config_root.join(APP_CONFIG_FILE))
             .await
-            .with_context(|| format!("reading {CONFIG_FILE}"))?;
-        let config = parse_config(&text).with_context(|| format!("parsing {CONFIG_FILE}"))?;
+            .with_context(|| format!("reading {APP_CONFIG_FILE}"))?;
+        let config = parse_config(&app_text).with_context(|| format!("parsing {APP_CONFIG_FILE}"))?;
 
-        // Whitelists live in their own lock so request handlers read them without
-        // contending on the full config; seed it from the merged document.
-        let whitelists = config.whitelists.clone();
+        // Whitelists ← config.mirror.json
+        let wl_text = tokio::fs::read_to_string(config_root.join(WHITELISTS_FILE))
+            .await
+            .with_context(|| format!("reading {WHITELISTS_FILE}"))?;
+        let whitelists: Whitelists = serde_json::from_str(&wl_text)
+            .with_context(|| format!("parsing {WHITELISTS_FILE}"))?;
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
@@ -427,42 +446,47 @@ mod tests {
         assert_eq!(cfg.config_sync.url, "https://example.com/config.mirror.json");
     }
 
-    // ── merged whitelists ────────────────────────────────────────────────
+    // ── whitelists live in a separate file (config.mirror.json) ──────────
 
     #[test]
-    fn test_whitelists_default_when_absent() {
-        // A document without a `whitelists` key yields empty whitelists.
-        let mirror = r#"{
-            "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1
-        }"#;
-        let cfg: AppConfig = serde_json::from_str(&config_json_with_mirror(mirror)).unwrap();
-        assert!(cfg.whitelists.avatar.is_empty());
-        assert!(cfg.whitelists.raw.is_empty());
+    fn test_app_config_rejects_whitelists_key() {
+        // Whitelists are NOT part of config.json; a stray `whitelists` key is an
+        // unknown field and must be rejected.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&config_json_with_mirror(
+                r#"{ "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 }"#,
+            ))
+            .unwrap();
+        json["whitelists"] = serde_json::json!({ "avatar": ["x"] });
+        let result: std::result::Result<AppConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_parse_config_reads_merged_whitelists() {
+    fn test_whitelists_parse_standalone() {
+        // The whitelists file is a bare Whitelists object; omitted sections default empty.
         let json = r#"{
-            "host": "0.0.0.0", "port": 7878, "publicOrigin": "https://example.com",
-            "trustProxyHeaders": true, "logLevel": "info",
-            "geo": { "mode": "off", "headerName": "h", "countries": [] },
-            "cacheTTL": { "raw": 0, "avatar": 0, "unpkg": 0 },
-            "mirror": { "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 },
-            "cors": { "enabledRoutes": [] },
-            "auth": { "enabled": false, "key": "", "value": "" },
-            "whitelists": {
-                "avatar": ["karinjs"],
-                "raw": { "karinjs": { "karin": [{ "branch": "HEAD", "file": "package.json" }] } },
-                "unpkg": { "karin": ["package.json"] }
-            }
+            "avatar": ["karinjs"],
+            "raw": { "karinjs": { "karin": [{ "branch": "HEAD", "file": "package.json" }] } },
+            "unpkg": { "karin": ["package.json"] }
         }"#;
-        let cfg = parse_config(json).unwrap();
-        assert_eq!(cfg.whitelists.avatar, vec!["karinjs"]);
-        assert!(cfg.whitelists.raw.contains_key("karinjs"));
-        assert!(cfg.whitelists.unpkg.contains_key("karin"));
-        // omitted sections default to empty
-        assert!(cfg.whitelists.releases.is_empty());
-        assert!(cfg.whitelists.mirror.is_empty());
+        let wl: Whitelists = serde_json::from_str(json).unwrap();
+        assert_eq!(wl.avatar, vec!["karinjs"]);
+        assert!(wl.raw.contains_key("karinjs"));
+        assert!(wl.unpkg.contains_key("karin"));
+        assert!(wl.releases.is_empty());
+        assert!(wl.mirror.is_empty());
+    }
+
+    #[test]
+    fn test_default_app_config_and_whitelists_parse() {
+        // The generated defaults must round-trip into their respective types.
+        let cfg: AppConfig =
+            serde_json::from_value(default_app_config()).expect("default app config parses");
+        assert_eq!(cfg.host, "0.0.0.0");
+        let wl: Whitelists =
+            serde_json::from_value(default_whitelists()).expect("default whitelists parse");
+        assert_eq!(wl.avatar, vec!["karinjs"]);
     }
 
     // ── validate_config ──────────────────────────────────────────────────

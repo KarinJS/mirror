@@ -1,4 +1,4 @@
-use crate::config::{parse_config, AppState, Whitelists, CONFIG_FILE};
+use crate::config::{AppState, Whitelists, WHITELISTS_FILE};
 use crate::validation::validate_sync_url;
 use futures::StreamExt;
 use reqwest::header::CONTENT_TYPE;
@@ -39,60 +39,32 @@ fn is_acceptable_content_type(value: &str) -> bool {
     ) || essence.ends_with("+json")
 }
 
-/// Parse a synced body into whitelists.
+/// Parse a synced body as a whitelists document (`config.mirror.json`).
 ///
-/// Accepts EITHER a bare whitelists object (`{avatar, raw, releases, unpkg,
-/// mirror}`) OR a full `config.mirror.json` (from which only `whitelists` is
-/// taken). The bare form is preferred so a **public** sync source need only
-/// publish the whitelists and never exposes app settings (host/port/auth/…).
+/// The sync source is the whitelists file (`{avatar, raw, releases, unpkg,
+/// mirror}`) only — it never carries app settings, so a public sync source
+/// exposes nothing but the whitelists.
 pub fn parse_synced_whitelists(body: &str) -> Result<Whitelists, String> {
-    // Try the bare whitelists object first.
-    match serde_json::from_str::<Whitelists>(body) {
-        Ok(w) => Ok(w),
-        // Fall back to a full config document (back-compat).
-        Err(bare_err) => parse_config(body).map(|c| c.whitelists).map_err(|cfg_err| {
-            format!("not a whitelists object ({bare_err}) nor a valid config ({cfg_err})")
-        }),
-    }
+    serde_json::from_str::<Whitelists>(body).map_err(|e| format!("invalid whitelists: {e}"))
 }
 
-/// Validate a freshly-fetched sync body and apply ONLY its `whitelists`.
+/// Validate a freshly-fetched whitelists document and apply it.
 ///
-/// Security model: the remote sync source is authoritative for the whitelists
-/// alone. App settings (`auth`, `host`, `port`, `geo`, `configSync`, …) always
-/// come from the local config and are never overwritten by a remote — so even a
-/// compromised sync source cannot disable auth, change the listen address, or
-/// redirect sync. The body is fully parsed/validated so malformed or malicious
-/// payloads are rejected before anything is written.
-///
-/// The merged document (local settings + remote whitelists) is what gets
-/// persisted, keeping the on-disk file consistent with this scope across
-/// restarts.
+/// Sync only ever touches the whitelists — the local app settings
+/// (`config.json`: auth/host/port/geo/configSync/…) are never read or written
+/// here, so a compromised sync source can at most change the whitelists (which
+/// remain bound by each route's SSRF / path validation). The body is fully
+/// parsed before any write, so malformed payloads are rejected.
 async fn apply_sync(state: &AppState, body: &str, path: &Path) -> Result<(), String> {
-    let remote_whitelists = parse_synced_whitelists(body)?;
+    let whitelists = parse_synced_whitelists(body)?;
 
-    // Build local-settings + remote-whitelists.
-    let mut merged = state.config.read().await.clone();
-    merged.whitelists = remote_whitelists;
-
-    let serialized = serde_json::to_string_pretty(&merged)
-        .map_err(|e| format!("serialize merged config: {e}"))?;
-
+    let serialized = serde_json::to_string_pretty(&whitelists)
+        .map_err(|e| format!("serialize whitelists: {e}"))?;
     tokio::fs::write(path, &serialized)
         .await
-        .map_err(|e| format!("write {CONFIG_FILE}: {e}"))?;
+        .map_err(|e| format!("write {WHITELISTS_FILE}: {e}"))?;
 
-    let new_whitelists = merged.whitelists.clone();
-    // Update the config snapshot (only whitelists changed) and the dedicated
-    // whitelists lock so both stay consistent.
-    {
-        let mut c = state.config.write().await;
-        *c = merged;
-    }
-    {
-        let mut w = state.whitelists.write().await;
-        *w = new_whitelists;
-    }
+    *state.whitelists.write().await = whitelists;
 
     tracing::info!("config sync: whitelists updated ({} bytes fetched)", body.len());
     Ok(())
@@ -184,12 +156,10 @@ pub async fn config_sync_task(state: AppState, client: Client) {
     let path = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config")
-        .join(CONFIG_FILE);
+        .join(WHITELISTS_FILE);
 
-    // Tracks the hash of the last successfully-applied REMOTE body. The on-disk
-    // file is a merged document (local settings + remote whitelists), so it
-    // can't be compared against a remote body directly — start fresh and let the
-    // first successful fetch apply once.
+    // Tracks the hash of the last successfully-applied REMOTE body. Start fresh
+    // so the first successful fetch always applies once.
     let mut last_hash: Option<String> = None;
 
     loop {
@@ -265,50 +235,38 @@ mod tests {
 
     // ── apply_sync validation ──
 
-    /// A merged config document with the given `whitelists` block inlined.
-    fn config_doc(whitelists: &str) -> String {
-        format!(
-            r#"{{
-            "host": "0.0.0.0", "port": 7878, "publicOrigin": "https://example.com",
-            "trustProxyHeaders": true, "logLevel": "info",
-            "geo": {{ "mode": "off", "headerName": "h", "countries": [] }},
-            "cacheTTL": {{ "raw": 0, "avatar": 0, "unpkg": 0 }},
-            "mirror": {{ "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 }},
-            "cors": {{ "enabledRoutes": [] }},
-            "auth": {{ "enabled": false, "key": "", "value": "" }},
-            "configSync": {{ "enabled": false, "intervalSeconds": 300, "url": "" }},
-            "whitelists": {whitelists}
-        }}"#
-        )
-    }
+    const APP_CFG: &str = r#"{
+        "host": "127.0.0.1", "port": 7878, "publicOrigin": "https://example.com",
+        "trustProxyHeaders": true, "logLevel": "info",
+        "geo": { "mode": "off", "headerName": "h", "countries": [] },
+        "cacheTTL": { "raw": 0, "avatar": 0, "unpkg": 0 },
+        "mirror": { "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 },
+        "cors": { "enabledRoutes": [] },
+        "auth": { "enabled": false, "key": "", "value": "" }
+    }"#;
 
-    /// Build an in-memory AppState from a merged config document.
-    fn state_from(doc: &str) -> AppState {
+    /// Build an in-memory AppState: app settings from APP_CFG + empty whitelists.
+    fn test_state() -> AppState {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let config = parse_config(doc).unwrap();
-        let whitelists = config.whitelists.clone();
+        let config = crate::config::parse_config(APP_CFG).unwrap();
         AppState {
             config: Arc::new(RwLock::new(config)),
-            whitelists: Arc::new(RwLock::new(whitelists)),
+            whitelists: Arc::new(RwLock::new(Whitelists::default())),
         }
     }
 
     #[tokio::test]
-    async fn test_apply_sync_valid_updates_state() {
+    async fn test_apply_sync_updates_whitelists() {
         let dir = std::env::temp_dir().join("mirror-sync-test-valid");
         let _ = tokio::fs::create_dir_all(&dir).await;
-        let path = dir.join(CONFIG_FILE);
+        let path = dir.join(WHITELISTS_FILE);
 
-        // Start empty, then sync a document that adds "karinjs" to the avatar list.
-        let state = state_from(&config_doc("{}"));
+        let state = test_state();
         assert!(state.whitelists.read().await.avatar.is_empty());
 
-        apply_sync(&state, &config_doc(r#"{ "avatar": ["karinjs"] }"#), &path)
-            .await
-            .unwrap();
+        apply_sync(&state, r#"{ "avatar": ["karinjs"] }"#, &path).await.unwrap();
 
-        // disk written and whitelist hot-reloaded into memory
         assert!(tokio::fs::read_to_string(&path).await.is_ok());
         assert_eq!(state.whitelists.read().await.avatar, vec!["karinjs"]);
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -318,94 +276,50 @@ mod tests {
     async fn test_apply_sync_invalid_does_not_write() {
         let dir = std::env::temp_dir().join("mirror-sync-test-invalid");
         let _ = tokio::fs::create_dir_all(&dir).await;
-        let path = dir.join(CONFIG_FILE);
+        let path = dir.join(WHITELISTS_FILE);
         let _ = tokio::fs::remove_file(&path).await;
 
-        let state = state_from(&config_doc("{}"));
+        let state = test_state();
         let err = apply_sync(&state, "{ not valid json", &path).await.unwrap_err();
-        assert!(err.contains("whitelists") || err.contains("config"));
+        assert!(err.contains("whitelists"));
         // Nothing should have been written to disk.
         assert!(tokio::fs::read_to_string(&path).await.is_err());
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    async fn test_apply_sync_accepts_bare_whitelists() {
-        // The preferred public sync source is a bare whitelists object — it must
-        // apply without carrying any app settings.
-        let dir = std::env::temp_dir().join("mirror-sync-test-bare");
+    async fn test_apply_sync_does_not_touch_app_config() {
+        // Sync writes ONLY the whitelists file; the app config is never touched,
+        // and the persisted file is a bare whitelists object (no app settings).
+        let dir = std::env::temp_dir().join("mirror-sync-test-scope");
         let _ = tokio::fs::create_dir_all(&dir).await;
-        let path = dir.join(CONFIG_FILE);
+        let path = dir.join(WHITELISTS_FILE);
 
-        let state = state_from(&config_doc("{}"));
-        let bare = r#"{ "avatar": ["karinjs", "NapNeko"], "unpkg": { "karin": ["package.json"] } }"#;
-        apply_sync(&state, bare, &path).await.unwrap();
+        let state = test_state();
+        apply_sync(&state, r#"{ "avatar": ["karinjs"] }"#, &path).await.unwrap();
 
         let cfg = state.config.read().await;
-        assert_eq!(cfg.whitelists.avatar, vec!["karinjs", "NapNeko"]);
-        assert!(cfg.whitelists.unpkg.contains_key("karin"));
-        // local app settings untouched
-        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert!(!cfg.auth.enabled);
+        drop(cfg);
+
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        let wl: Whitelists = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(wl.avatar, vec!["karinjs"]);
+        assert!(!on_disk.contains("\"host\""), "persisted file must not contain app settings");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]
-    fn test_parse_synced_whitelists_both_forms() {
-        // bare whitelists
-        let bare = parse_synced_whitelists(r#"{ "avatar": ["a"] }"#).unwrap();
-        assert_eq!(bare.avatar, vec!["a"]);
-        // full config -> extracts whitelists
-        let full = parse_synced_whitelists(&config_doc(r#"{ "avatar": ["b"] }"#)).unwrap();
-        assert_eq!(full.avatar, vec!["b"]);
-        // garbage
+    fn test_parse_synced_whitelists() {
+        let wl = parse_synced_whitelists(r#"{ "avatar": ["a"] }"#).unwrap();
+        assert_eq!(wl.avatar, vec!["a"]);
+        // garbage rejected
         assert!(parse_synced_whitelists("not json").is_err());
-        // unknown top-level key (typo) rejected by both paths
+        // a full app-config doc is NOT a whitelists object → rejected
+        assert!(parse_synced_whitelists(APP_CFG).is_err());
+        // unknown key (typo) rejected
         assert!(parse_synced_whitelists(r#"{ "avatr": ["x"] }"#).is_err());
-    }
-
-    #[tokio::test]
-    async fn test_apply_sync_ignores_remote_security_settings() {
-        // The remote tries to enable auth, change host/port, and re-point sync.
-        // None of that must take effect — only the whitelists are adopted.
-        let dir = std::env::temp_dir().join("mirror-sync-test-scope");
-        let _ = tokio::fs::create_dir_all(&dir).await;
-        let path = dir.join(CONFIG_FILE);
-
-        let state = state_from(&config_doc("{}"));
-
-        let hostile_remote = r#"{
-            "host": "10.0.0.9", "port": 1, "publicOrigin": "https://evil.example",
-            "trustProxyHeaders": true, "logLevel": "info",
-            "geo": { "mode": "deny", "headerName": "h", "countries": ["CN"] },
-            "cacheTTL": { "raw": 0, "avatar": 0, "unpkg": 0 },
-            "mirror": { "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 },
-            "cors": { "enabledRoutes": [] },
-            "auth": { "enabled": true, "key": "X-Pwn", "value": "secret" },
-            "configSync": { "enabled": true, "intervalSeconds": 1, "url": "https://evil.example/c.json" },
-            "whitelists": { "avatar": ["karinjs"] }
-        }"#;
-
-        apply_sync(&state, hostile_remote, &path).await.unwrap();
-
-        let cfg = state.config.read().await;
-        // Whitelists DID update.
-        assert_eq!(cfg.whitelists.avatar, vec!["karinjs"]);
-        // Security-sensitive settings stayed LOCAL.
-        assert_eq!(cfg.host, "0.0.0.0");
-        assert_eq!(cfg.port, 7878);
-        assert!(!cfg.auth.enabled, "remote must not be able to enable auth");
-        assert!(matches!(cfg.geo.mode, crate::config::GeoMode::Off));
-        assert!(!cfg.config_sync.enabled, "remote must not re-point sync");
-        assert!(cfg.config_sync.url.is_empty());
-        drop(cfg);
-
-        // The persisted file is the merged doc and must reflect local settings.
-        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
-        let parsed = parse_config(&on_disk).unwrap();
-        assert_eq!(parsed.host, "0.0.0.0");
-        assert!(!parsed.auth.enabled);
-        assert_eq!(parsed.whitelists.avatar, vec!["karinjs"]);
-        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     // ── is_acceptable_content_type ──

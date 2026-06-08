@@ -12,6 +12,6 @@ webui/.vite
 /.claude
 /新建文件夹
 
-# May contain auth credentials (merged app config + whitelists)
-config/config.mirror.json
+# App settings (host/port/auth/…) — may contain credentials, private per instance
+config/config.json
 /logs
