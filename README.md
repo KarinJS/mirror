@@ -217,7 +217,7 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 **工作流程：**
 
 1. 每隔 `intervalSeconds` 秒，对配置的 `url` 发起一次 HTTP GET 请求
-2. **强制校验响应 `Content-Type` 必须为 JSON**（`application/json` / `text/json` / `*+json`）——非 JSON（HTML、纯文本等）直接拒绝
+2. **校验响应 `Content-Type`**：接受 JSON 类型（`application/json` / `text/json` / `*+json`）**以及 `text/plain`**（GitHub raw 等静态托管会把 `.json` 返回成 `text/plain`）；`text/html`（被劫持的登录页）、二进制等直接拒绝。这只是粗筛，响应体随后仍会被完整解析并按 config 校验
 3. 计算响应体的 SHA-256，与上次成功采用的哈希比对；相同则跳过
 4. 若不同 → 完整解析并校验整份配置（结构 + 语义）→ 取其 `whitelists` 与**本地**应用设置合并 → 写入本地文件 → 热更新内存白名单
 5. 若请求失败 / 非 JSON / 校验失败 → 记录告警日志，本地文件与内存配置均不受影响，下个周期重试
@@ -225,11 +225,11 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 **安全特性：**
 
 - 远程仅能影响白名单；`auth` / `host` / `port` / `geo` / `configSync` 恒为本地值
-- 强制 JSON `Content-Type` + 完整结构/语义校验，无效或被劫持（如返回登录页）的响应一律拒绝，绝不写入磁盘
+- `Content-Type` 粗筛（拒绝 HTML/二进制）+ 完整结构/语义校验，无效或被劫持（如返回登录页）的响应一律拒绝，绝不写入磁盘
 - 网络错误 / 非 2xx 状态码 / 超出 10 MB 体积上限均记录告警，不影响服务正常运行
 - 同步 URL 经过 SSRF / DNS 重绑定防护校验（必须 https、禁止内网/环回/userinfo）
 
-> **托管提示**：同步源必须以 JSON `Content-Type` 返回。GitHub **raw**（`raw.githubusercontent.com`）返回的是 `text/plain`，会被拒绝；请改用 GitHub **Pages**、jsDelivr、Cloudflare 或你自己的 EO/对象存储（这些默认以 `application/json` 返回 `.json`）。
+> **托管提示**：GitHub **raw**（`raw.githubusercontent.com`，返回 `text/plain`）、jsDelivr、GitHub Pages、Cloudflare、对象存储等均可。注意 jsDelivr 有 ~12h 缓存；GitHub raw 实时但 `Content-Type` 为 `text/plain`（已被接受）。
 
 ## 路由说明
 

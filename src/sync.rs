@@ -14,21 +14,29 @@ fn hex_sha256(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
-/// Whether a `Content-Type` header value denotes JSON.
+/// Whether a response `Content-Type` is acceptable for a config document.
 ///
-/// Parameters (e.g. `; charset=utf-8`) are ignored. Accepts `application/json`,
-/// `text/json`, and any structured-suffix `*+json` type. Everything else —
-/// including a missing/empty header, `text/html`, `text/plain`, or
-/// `application/octet-stream` — is rejected, so a hijacked sync URL serving an
-/// HTML error/login page can't be mistaken for config.
-fn is_json_content_type(value: &str) -> bool {
+/// Parameters (e.g. `; charset=utf-8`) are ignored. Accepts JSON types
+/// (`application/json`, `text/json`, any `*+json`) **and `text/plain`** — many
+/// static hosts, notably `raw.githubusercontent.com`, serve `.json` as
+/// `text/plain; charset=utf-8`.
+///
+/// This is only a coarse early filter. The body is ALWAYS fully parsed and
+/// semantically validated as an `AppConfig` afterwards, so a hijacked endpoint
+/// that happens to return `text/plain` garbage still gets rejected at parse
+/// time. `text/html` (the classic captive-portal / login-page hijack),
+/// `application/octet-stream`, and a missing/empty header are rejected here.
+fn is_acceptable_content_type(value: &str) -> bool {
     let essence = value
         .split(';')
         .next()
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    essence == "application/json" || essence == "text/json" || essence.ends_with("+json")
+    matches!(
+        essence.as_str(),
+        "application/json" | "text/json" | "text/plain"
+    ) || essence.ends_with("+json")
 }
 
 /// Validate a freshly-fetched config document and apply ONLY its `whitelists`.
@@ -107,17 +115,17 @@ async fn sync_once(
             return Err(format!("{url} returned HTTP {status}"));
         }
 
-        // Enforce a JSON Content-Type before reading the body. A hijacked or
-        // misconfigured URL serving HTML/plain text is rejected here rather than
-        // being fed to the JSON parser.
+        // Coarse Content-Type filter before reading the body: reject HTML/binary
+        // (e.g. a hijacked login page) early. JSON and text/plain pass; the body
+        // is still fully parsed and validated as a config below regardless.
         let content_type = resp
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !is_json_content_type(content_type) {
+        if !is_acceptable_content_type(content_type) {
             return Err(format!(
-                "{url}: response is not JSON (Content-Type: {:?})",
+                "{url}: unacceptable Content-Type for config: {:?}",
                 content_type
             ));
         }
@@ -350,25 +358,28 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
-    // ── is_json_content_type ──
+    // ── is_acceptable_content_type ──
 
     #[test]
-    fn test_is_json_content_type_accepts() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-        assert!(is_json_content_type("Application/JSON"));
-        assert!(is_json_content_type("  application/json  "));
-        assert!(is_json_content_type("text/json"));
-        assert!(is_json_content_type("application/vnd.api+json"));
+    fn test_acceptable_content_type_accepts() {
+        assert!(is_acceptable_content_type("application/json"));
+        assert!(is_acceptable_content_type("application/json; charset=utf-8"));
+        assert!(is_acceptable_content_type("Application/JSON"));
+        assert!(is_acceptable_content_type("  application/json  "));
+        assert!(is_acceptable_content_type("text/json"));
+        assert!(is_acceptable_content_type("application/vnd.api+json"));
+        // GitHub raw and many static hosts serve .json as text/plain.
+        assert!(is_acceptable_content_type("text/plain"));
+        assert!(is_acceptable_content_type("text/plain; charset=utf-8"));
     }
 
     #[test]
-    fn test_is_json_content_type_rejects() {
-        assert!(!is_json_content_type(""));
-        assert!(!is_json_content_type("text/html"));
-        assert!(!is_json_content_type("text/plain"));
-        assert!(!is_json_content_type("text/plain; charset=utf-8"));
-        assert!(!is_json_content_type("application/octet-stream"));
-        assert!(!is_json_content_type("application/jsonish"));
+    fn test_acceptable_content_type_rejects() {
+        // Empty/HTML/binary are rejected early (the body parse is the real guard).
+        assert!(!is_acceptable_content_type(""));
+        assert!(!is_acceptable_content_type("text/html"));
+        assert!(!is_acceptable_content_type("text/html; charset=utf-8"));
+        assert!(!is_acceptable_content_type("application/octet-stream"));
+        assert!(!is_acceptable_content_type("application/jsonish"));
     }
 }
