@@ -1,7 +1,7 @@
-use crate::config::{
-    AppState, AvatarWhitelist, ConfigSyncUrls, MirrorWhitelist, RawWhitelist,
-    ReleasesWhitelist, UnpkgWhitelist,
-};
+use crate::config::{parse_config, AppState, CONFIG_FILE};
+use crate::validation::validate_sync_url;
+use futures::StreamExt;
+use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -10,192 +10,89 @@ use std::time::Duration;
 // Cap sync response bodies at 10 MB to guard against misconfigured URLs.
 const MAX_SYNC_BODY_BYTES: usize = 10 * 1024 * 1024;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum WhitelistKind {
-    Avatar,
-    Raw,
-    Releases,
-    Mirror,
-    Unpkg,
-}
-
-impl WhitelistKind {
-    pub fn all() -> [Self; 5] {
-        [Self::Avatar, Self::Raw, Self::Releases, Self::Mirror, Self::Unpkg]
-    }
-
-    pub fn filename(self) -> &'static str {
-        match self {
-            Self::Avatar => "github.avatar.json",
-            Self::Raw => "github.raw.json",
-            Self::Releases => "github.releases.json",
-            Self::Mirror => "mirror.json",
-            Self::Unpkg => "unpkg.json",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Avatar => "avatar",
-            Self::Raw => "raw",
-            Self::Releases => "releases",
-            Self::Mirror => "mirror",
-            Self::Unpkg => "unpkg",
-        }
-    }
-
-    fn url(self, urls: &ConfigSyncUrls) -> &str {
-        match self {
-            Self::Avatar => &urls.avatar,
-            Self::Raw => &urls.raw,
-            Self::Releases => &urls.releases,
-            Self::Mirror => &urls.mirror,
-            Self::Unpkg => &urls.unpkg,
-        }
-    }
-}
-
-#[derive(Default)]
-struct SyncHashes {
-    avatar: Option<String>,
-    raw: Option<String>,
-    releases: Option<String>,
-    mirror: Option<String>,
-    unpkg: Option<String>,
-}
-
-impl SyncHashes {
-    fn get(&self, kind: WhitelistKind) -> &Option<String> {
-        match kind {
-            WhitelistKind::Avatar => &self.avatar,
-            WhitelistKind::Raw => &self.raw,
-            WhitelistKind::Releases => &self.releases,
-            WhitelistKind::Mirror => &self.mirror,
-            WhitelistKind::Unpkg => &self.unpkg,
-        }
-    }
-
-    fn set(&mut self, kind: WhitelistKind, hash: String) {
-        let slot = match kind {
-            WhitelistKind::Avatar => &mut self.avatar,
-            WhitelistKind::Raw => &mut self.raw,
-            WhitelistKind::Releases => &mut self.releases,
-            WhitelistKind::Mirror => &mut self.mirror,
-            WhitelistKind::Unpkg => &mut self.unpkg,
-        };
-        *slot = Some(hash);
-    }
-}
-
 fn hex_sha256(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    format!("{:x}", Sha256::digest(data))
 }
 
-/// Validate that a JSON body can be deserialized into the correct whitelist type.
-/// Public for testability.
-pub fn validate_whitelist_json(kind: WhitelistKind, body: &str) -> Result<(), String> {
-    if body.trim().is_empty() {
-        return Err("empty body".to_string());
-    }
-    match kind {
-        WhitelistKind::Avatar => {
-            let _: AvatarWhitelist =
-                serde_json::from_str(body).map_err(|e| format!("invalid avatar json: {e}"))?;
-        }
-        WhitelistKind::Raw => {
-            let _: RawWhitelist =
-                serde_json::from_str(body).map_err(|e| format!("invalid raw json: {e}"))?;
-        }
-        WhitelistKind::Releases => {
-            let _: ReleasesWhitelist =
-                serde_json::from_str(body).map_err(|e| format!("invalid releases json: {e}"))?;
-        }
-        WhitelistKind::Mirror => {
-            let _: MirrorWhitelist =
-                serde_json::from_str(body).map_err(|e| format!("invalid mirror json: {e}"))?;
-        }
-        WhitelistKind::Unpkg => {
-            let _: UnpkgWhitelist =
-                serde_json::from_str(body).map_err(|e| format!("invalid unpkg json: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
-async fn init_hashes(config_root: &Path) -> SyncHashes {
-    let mut hashes = SyncHashes::default();
-    for kind in WhitelistKind::all() {
-        let path = config_root.join(kind.filename());
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            let hash = hex_sha256(content.as_bytes());
-            hashes.set(kind, hash);
-        }
-    }
-    hashes
-}
-
-async fn apply_sync(
-    state: &AppState,
-    kind: WhitelistKind,
-    body: &str,
-    config_root: &Path,
-    new_hash: &str,
-    hashes: &mut SyncHashes,
-) -> Result<(), String> {
-    validate_whitelist_json(kind, body)?;
-
-    // Write to disk
-    let path = config_root.join(kind.filename());
-    tokio::fs::write(&path, body)
-        .await
-        .map_err(|e| format!("write {}: {e}", kind.filename()))?;
-
-    // Hot-reload into memory
-    {
-        let mut whitelists = state.whitelists.write().await;
-        match kind {
-            WhitelistKind::Avatar => {
-                whitelists.avatar = serde_json::from_str(body).expect("validated above");
-            }
-            WhitelistKind::Raw => {
-                whitelists.raw = serde_json::from_str(body).expect("validated above");
-            }
-            WhitelistKind::Releases => {
-                whitelists.releases = serde_json::from_str(body).expect("validated above");
-            }
-            WhitelistKind::Mirror => {
-                whitelists.mirror = serde_json::from_str(body).expect("validated above");
-            }
-            WhitelistKind::Unpkg => {
-                whitelists.unpkg = serde_json::from_str(body).expect("validated above");
-            }
-        }
-    }
-
-    hashes.set(kind, new_hash.to_string());
-    tracing::info!(
-        "config sync: {} updated ({} bytes)",
-        kind.name(),
-        body.len()
-    );
-    Ok(())
-}
-
-/// Fetch, hash, compare, and apply one whitelist file from remote.
+/// Whether a `Content-Type` header value denotes JSON.
 ///
-/// Every error path returns the error as a String rather than panicking,
-/// so a single bad URL or malformed response never takes down the task.
-async fn sync_one(
-    kind: WhitelistKind,
+/// Parameters (e.g. `; charset=utf-8`) are ignored. Accepts `application/json`,
+/// `text/json`, and any structured-suffix `*+json` type. Everything else —
+/// including a missing/empty header, `text/html`, `text/plain`, or
+/// `application/octet-stream` — is rejected, so a hijacked sync URL serving an
+/// HTML error/login page can't be mistaken for config.
+fn is_json_content_type(value: &str) -> bool {
+    let essence = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    essence == "application/json" || essence == "text/json" || essence.ends_with("+json")
+}
+
+/// Validate a freshly-fetched config document and apply ONLY its `whitelists`.
+///
+/// Security model: the remote sync source is treated as authoritative for the
+/// whitelists alone. App settings (`auth`, `host`, `port`, `geo`, `configSync`,
+/// …) always come from the local config and are never overwritten by a remote —
+/// so even a compromised sync source cannot disable auth, change the listen
+/// address, or redirect sync. The full document is still parsed and validated
+/// (structure + semantics) so a malformed or malicious payload is rejected
+/// before anything is written.
+///
+/// The merged document (local settings + remote whitelists) is what gets
+/// persisted, keeping the on-disk file consistent with this scope across
+/// restarts.
+async fn apply_sync(state: &AppState, body: &str, path: &Path) -> Result<(), String> {
+    let remote = parse_config(body).map_err(|e| format!("invalid config: {e}"))?;
+
+    // Build local-settings + remote-whitelists, validate happened above.
+    let mut merged = state.config.read().await.clone();
+    merged.whitelists = remote.whitelists;
+
+    let serialized = serde_json::to_string_pretty(&merged)
+        .map_err(|e| format!("serialize merged config: {e}"))?;
+
+    tokio::fs::write(path, &serialized)
+        .await
+        .map_err(|e| format!("write {CONFIG_FILE}: {e}"))?;
+
+    let new_whitelists = merged.whitelists.clone();
+    // Update the config snapshot (only whitelists changed) and the dedicated
+    // whitelists lock so both stay consistent.
+    {
+        let mut c = state.config.write().await;
+        *c = merged;
+    }
+    {
+        let mut w = state.whitelists.write().await;
+        *w = new_whitelists;
+    }
+
+    tracing::info!("config sync: whitelists updated ({} bytes fetched)", body.len());
+    Ok(())
+}
+
+/// Fetch the remote config once, compare by hash, and apply it if changed.
+///
+/// Every error path returns the error as a String rather than panicking, so a
+/// single bad URL or malformed response never takes down the task. Note that
+/// `host`/`port` changes only take effect on restart — the listener is already
+/// bound — while everything else (auth, geo, cacheTTL, whitelists) is live.
+async fn sync_once(
     url: &str,
-    config_root: &Path,
+    path: &Path,
     client: &Client,
     state: &AppState,
-    hashes: &mut SyncHashes,
+    last_hash: &mut Option<String>,
 ) {
+    // Validate sync URL (SSRF + DNS rebinding protection)
+    if let Err(reason) = validate_sync_url(url).await {
+        tracing::warn!("config sync: {reason}");
+        return;
+    }
+
     let result: Result<(), String> = async {
         let resp = client
             .get(url)
@@ -203,24 +100,35 @@ async fn sync_one(
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| format!("fetch {}: {e}", url))?;
+            .map_err(|e| format!("fetch {url}: {e}"))?;
 
         let status = resp.status();
         if !status.is_success() {
             return Err(format!("{url} returned HTTP {status}"));
         }
 
+        // Enforce a JSON Content-Type before reading the body. A hijacked or
+        // misconfigured URL serving HTML/plain text is rejected here rather than
+        // being fed to the JSON parser.
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !is_json_content_type(content_type) {
+            return Err(format!(
+                "{url}: response is not JSON (Content-Type: {:?})",
+                content_type
+            ));
+        }
+
         // Stream body with a hard size cap to avoid OOM on misconfigured URLs.
         let mut buf = Vec::with_capacity(8192);
         let mut stream = resp.bytes_stream();
-        use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("stream read {url}: {e}"))?;
             if buf.len() + chunk.len() > MAX_SYNC_BODY_BYTES {
-                return Err(format!(
-                    "{url}: body exceeds {} bytes",
-                    MAX_SYNC_BODY_BYTES
-                ));
+                return Err(format!("{url}: body exceeds {MAX_SYNC_BODY_BYTES} bytes"));
             }
             buf.extend_from_slice(&chunk);
         }
@@ -232,46 +140,52 @@ async fn sync_one(
         let body = String::from_utf8(buf).map_err(|e| format!("{url}: invalid utf-8: {e}"))?;
 
         let new_hash = hex_sha256(body.as_bytes());
-
-        if hashes.get(kind).as_deref() == Some(&new_hash) {
-            tracing::debug!("config sync: {} unchanged", kind.name());
+        if last_hash.as_deref() == Some(&new_hash) {
+            tracing::debug!("config sync: unchanged");
             return Ok(());
         }
 
-        apply_sync(state, kind, &body, config_root, &new_hash, hashes).await
+        apply_sync(state, &body, path).await?;
+        *last_hash = Some(new_hash);
+        Ok(())
     }
     .await;
 
     if let Err(e) = result {
-        tracing::warn!("config sync: {} sync failed — {e}", kind.name());
+        tracing::warn!("config sync: failed — {e}");
     }
 }
 
 pub async fn config_sync_task(state: AppState, client: Client) {
-    let config_root = std::env::current_dir()
+    let path = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join("config");
+        .join("config")
+        .join(CONFIG_FILE);
 
-    let mut hashes = init_hashes(&config_root).await;
+    // Tracks the hash of the last successfully-applied REMOTE body. The on-disk
+    // file is a merged document (local settings + remote whitelists), so it
+    // can't be compared against a remote body directly — start fresh and let the
+    // first successful fetch apply once.
+    let mut last_hash: Option<String> = None;
 
     loop {
-        let (enabled, interval_secs, urls) = {
+        let (enabled, interval_secs, url) = {
             let cfg = state.config.read().await;
+            let raw_interval = cfg.config_sync.interval_seconds;
+            if raw_interval == 0 {
+                tracing::warn!("config sync: intervalSeconds is 0, using default 300s");
+            }
             (
                 cfg.config_sync.enabled,
-                cfg.config_sync.interval_seconds.max(1),
-                cfg.config_sync.urls.clone(),
+                if raw_interval == 0 { 300 } else { raw_interval.max(1) },
+                cfg.config_sync.url.clone(),
             )
         };
 
-        if enabled {
-            for kind in WhitelistKind::all() {
-                let url = kind.url(&urls);
-                if url.is_empty() {
-                    continue;
-                }
-                sync_one(kind, url, &config_root, &client, &state, &mut hashes).await;
-            }
+        if enabled && !url.is_empty() {
+            sync_once(&url, &path, &client, &state, &mut last_hash).await;
+        } else if enabled {
+            tracing::debug!("config sync: enabled but url is empty, skipping");
         } else {
             tracing::debug!("config sync: disabled, sleeping");
         }
@@ -284,11 +198,10 @@ pub async fn config_sync_task(state: AppState, client: Client) {
 mod tests {
     use super::*;
 
-    // ── hex_sha256 ────────────────────────────────────────────
+    // ── hex_sha256 ──
 
     #[test]
     fn test_hex_sha256_known_vector() {
-        // Empty string vector from NIST.
         let hash = hex_sha256(b"");
         assert_eq!(
             hash,
@@ -321,161 +234,141 @@ mod tests {
 
     #[test]
     fn test_hex_sha256_length_is_64() {
-        // SHA-256 always produces 32 bytes → 64 hex chars.
         for input in &[b"" as &[u8], b"x", b"hello world", &[0u8; 1024]] {
             assert_eq!(hex_sha256(input).len(), 64);
         }
     }
 
-    // ── WhitelistKind ─────────────────────────────────────────
+    // ── apply_sync validation ──
 
-    #[test]
-    fn test_all_returns_five() {
-        assert_eq!(WhitelistKind::all().len(), 5);
+    /// A merged config document with the given `whitelists` block inlined.
+    fn config_doc(whitelists: &str) -> String {
+        format!(
+            r#"{{
+            "host": "0.0.0.0", "port": 7878, "publicOrigin": "https://example.com",
+            "trustProxyHeaders": true, "logLevel": "info",
+            "geo": {{ "mode": "off", "headerName": "h", "countries": [] }},
+            "cacheTTL": {{ "raw": 0, "avatar": 0, "unpkg": 0 }},
+            "mirror": {{ "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 }},
+            "cors": {{ "enabledRoutes": [] }},
+            "auth": {{ "enabled": false, "key": "", "value": "" }},
+            "configSync": {{ "enabled": false, "intervalSeconds": 300, "url": "" }},
+            "whitelists": {whitelists}
+        }}"#
+        )
     }
 
-    #[test]
-    fn test_filename_mapping() {
-        assert_eq!(WhitelistKind::Avatar.filename(), "github.avatar.json");
-        assert_eq!(WhitelistKind::Raw.filename(), "github.raw.json");
-        assert_eq!(
-            WhitelistKind::Releases.filename(),
-            "github.releases.json"
-        );
-        assert_eq!(WhitelistKind::Mirror.filename(), "mirror.json");
-        assert_eq!(WhitelistKind::Unpkg.filename(), "unpkg.json");
-    }
-
-    #[test]
-    fn test_name_mapping() {
-        assert_eq!(WhitelistKind::Avatar.name(), "avatar");
-        assert_eq!(WhitelistKind::Raw.name(), "raw");
-        assert_eq!(WhitelistKind::Releases.name(), "releases");
-        assert_eq!(WhitelistKind::Mirror.name(), "mirror");
-        assert_eq!(WhitelistKind::Unpkg.name(), "unpkg");
-    }
-
-    #[test]
-    fn test_all_covers_every_kind() {
-        let kinds = WhitelistKind::all();
-        let names: Vec<&str> = kinds.iter().map(|k| k.name()).collect();
-        assert!(names.contains(&"avatar"));
-        assert!(names.contains(&"raw"));
-        assert!(names.contains(&"releases"));
-        assert!(names.contains(&"mirror"));
-        assert!(names.contains(&"unpkg"));
-    }
-
-    #[test]
-    fn test_debug_format() {
-        let s = format!("{:?}", WhitelistKind::Avatar);
-        assert_eq!(s, "Avatar");
-    }
-
-    // ── validate_whitelist_json ───────────────────────────────
-
-    #[test]
-    fn test_validate_avatar_valid() {
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, r#"["karinjs"]"#).is_ok());
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, "[]").is_ok());
-    }
-
-    #[test]
-    fn test_validate_avatar_invalid() {
-        // Not an array — should fail.
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, r#"{"x": 1}"#).is_err());
-        // Not valid JSON at all.
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, "not json").is_err());
-    }
-
-    #[test]
-    fn test_validate_raw_valid() {
-        let json = r#"{"karinjs":{"karin":[{"branch":"HEAD","file":"package.json"}]}}"#;
-        assert!(validate_whitelist_json(WhitelistKind::Raw, json).is_ok());
-    }
-
-    #[test]
-    fn test_validate_raw_invalid() {
-        assert!(validate_whitelist_json(WhitelistKind::Raw, "[]").is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Raw, "").is_err());
-    }
-
-    #[test]
-    fn test_validate_mirror_valid_simple() {
-        assert!(
-            validate_whitelist_json(WhitelistKind::Mirror, r#"{"https://example.com": 0}"#)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_validate_mirror_valid_complex() {
-        let json =
-            r#"{"https://example.com":{"ttl":60,"maxSize":1048576}}"#;
-        assert!(validate_whitelist_json(WhitelistKind::Mirror, json).is_ok());
-    }
-
-    #[test]
-    fn test_validate_mirror_invalid() {
-        assert!(validate_whitelist_json(WhitelistKind::Mirror, "[]").is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Mirror, "not json").is_err());
-    }
-
-    #[test]
-    fn test_validate_unpkg_valid() {
-        let json = r#"{"karin":["package.json"]}"#;
-        assert!(validate_whitelist_json(WhitelistKind::Unpkg, json).is_ok());
-    }
-
-    #[test]
-    fn test_validate_unpkg_invalid() {
-        assert!(validate_whitelist_json(WhitelistKind::Unpkg, "42").is_err());
-    }
-
-    #[test]
-    fn test_validate_releases_valid() {
-        let json = r#"{"NapNeko":{"NapCatQQ":["NapCat.Framework.zip"]}}"#;
-        assert!(validate_whitelist_json(WhitelistKind::Releases, json).is_ok());
-    }
-
-    #[test]
-    fn test_validate_releases_invalid() {
-        assert!(validate_whitelist_json(WhitelistKind::Releases, "null").is_err());
-    }
-
-    #[test]
-    fn test_validate_empty_body() {
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, "").is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, "   ").is_err());
-    }
-
-    #[test]
-    fn test_validate_malformed_utf8_equivalent() {
-        // Valid JSON but wrong type for every kind.
-        let bad = "true";
-        assert!(validate_whitelist_json(WhitelistKind::Avatar, bad).is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Raw, bad).is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Releases, bad).is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Mirror, bad).is_err());
-        assert!(validate_whitelist_json(WhitelistKind::Unpkg, bad).is_err());
-    }
-
-    // ── SyncHashes ────────────────────────────────────────────
-
-    #[test]
-    fn test_sync_hashes_default_all_none() {
-        let h = SyncHashes::default();
-        for kind in WhitelistKind::all() {
-            assert!(h.get(kind).is_none());
+    /// Build an in-memory AppState from a merged config document.
+    fn state_from(doc: &str) -> AppState {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let config = parse_config(doc).unwrap();
+        let whitelists = config.whitelists.clone();
+        AppState {
+            config: Arc::new(RwLock::new(config)),
+            whitelists: Arc::new(RwLock::new(whitelists)),
         }
     }
 
+    #[tokio::test]
+    async fn test_apply_sync_valid_updates_state() {
+        let dir = std::env::temp_dir().join("mirror-sync-test-valid");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join(CONFIG_FILE);
+
+        // Start empty, then sync a document that adds "karinjs" to the avatar list.
+        let state = state_from(&config_doc("{}"));
+        assert!(state.whitelists.read().await.avatar.is_empty());
+
+        apply_sync(&state, &config_doc(r#"{ "avatar": ["karinjs"] }"#), &path)
+            .await
+            .unwrap();
+
+        // disk written and whitelist hot-reloaded into memory
+        assert!(tokio::fs::read_to_string(&path).await.is_ok());
+        assert_eq!(state.whitelists.read().await.avatar, vec!["karinjs"]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_apply_sync_invalid_does_not_write() {
+        let dir = std::env::temp_dir().join("mirror-sync-test-invalid");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join(CONFIG_FILE);
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let state = state_from(&config_doc("{}"));
+        let err = apply_sync(&state, "{ not valid json", &path).await.unwrap_err();
+        assert!(err.contains("invalid config"));
+        // Nothing should have been written to disk.
+        assert!(tokio::fs::read_to_string(&path).await.is_err());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_apply_sync_ignores_remote_security_settings() {
+        // The remote tries to enable auth, change host/port, and re-point sync.
+        // None of that must take effect — only the whitelists are adopted.
+        let dir = std::env::temp_dir().join("mirror-sync-test-scope");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join(CONFIG_FILE);
+
+        let state = state_from(&config_doc("{}"));
+
+        let hostile_remote = r#"{
+            "host": "10.0.0.9", "port": 1, "publicOrigin": "https://evil.example",
+            "trustProxyHeaders": true, "logLevel": "info",
+            "geo": { "mode": "deny", "headerName": "h", "countries": ["CN"] },
+            "cacheTTL": { "raw": 0, "avatar": 0, "unpkg": 0 },
+            "mirror": { "defaultTTL": 0, "defaultMaxSize": 1, "absoluteMaxSize": 1, "fetchTimeoutMs": 1 },
+            "cors": { "enabledRoutes": [] },
+            "auth": { "enabled": true, "key": "X-Pwn", "value": "secret" },
+            "configSync": { "enabled": true, "intervalSeconds": 1, "url": "https://evil.example/c.json" },
+            "whitelists": { "avatar": ["karinjs"] }
+        }"#;
+
+        apply_sync(&state, hostile_remote, &path).await.unwrap();
+
+        let cfg = state.config.read().await;
+        // Whitelists DID update.
+        assert_eq!(cfg.whitelists.avatar, vec!["karinjs"]);
+        // Security-sensitive settings stayed LOCAL.
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 7878);
+        assert!(!cfg.auth.enabled, "remote must not be able to enable auth");
+        assert!(matches!(cfg.geo.mode, crate::config::GeoMode::Off));
+        assert!(!cfg.config_sync.enabled, "remote must not re-point sync");
+        assert!(cfg.config_sync.url.is_empty());
+        drop(cfg);
+
+        // The persisted file is the merged doc and must reflect local settings.
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed = parse_config(&on_disk).unwrap();
+        assert_eq!(parsed.host, "0.0.0.0");
+        assert!(!parsed.auth.enabled);
+        assert_eq!(parsed.whitelists.avatar, vec!["karinjs"]);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── is_json_content_type ──
+
     #[test]
-    fn test_sync_hashes_set_and_get() {
-        let mut h = SyncHashes::default();
-        h.set(WhitelistKind::Avatar, "abc".into());
-        assert_eq!(h.get(WhitelistKind::Avatar).as_deref(), Some("abc"));
-        // Other kinds still None.
-        assert!(h.get(WhitelistKind::Raw).is_none());
+    fn test_is_json_content_type_accepts() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("Application/JSON"));
+        assert!(is_json_content_type("  application/json  "));
+        assert!(is_json_content_type("text/json"));
+        assert!(is_json_content_type("application/vnd.api+json"));
+    }
+
+    #[test]
+    fn test_is_json_content_type_rejects() {
+        assert!(!is_json_content_type(""));
+        assert!(!is_json_content_type("text/html"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("text/plain; charset=utf-8"));
+        assert!(!is_json_content_type("application/octet-stream"));
+        assert!(!is_json_content_type("application/jsonish"));
     }
 }
