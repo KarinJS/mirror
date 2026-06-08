@@ -10,3 +10,8 @@ webui/.vite
 
 /target
 /.claude
+/新建文件夹
+
+# May contain auth credentials (merged app config + whitelists)
+config/config.mirror.json
+/logs
