@@ -1,0 +1,24 @@
+{
+  "avatar": ["karinjs"],
+  "raw": {
+    "karinjs": {
+      "karin": [
+        {
+          "branch": "HEAD",
+          "file": "package.json"
+        }
+      ]
+    }
+  },
+  "releases": {
+    "NapNeko": {
+      "NapCatQQ": ["NapCat.Framework.zip"]
+    }
+  },
+  "unpkg": {
+    "karin": ["package.json", "dist/karin.umd.js"]
+  },
+  "mirror": {
+    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0
+  }
+}
