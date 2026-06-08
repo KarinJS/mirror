@@ -68,6 +68,83 @@ tail -f logs/mirror.log
 
 > 生产环境建议配合 systemd（Linux）或 NSSM / 任务计划程序（Windows）实现进程守护与开机自启。
 
+### EO / CDN 回源 + Caddy 反代（生产推荐）
+
+让 CDN（如腾讯 EdgeOne）在边缘终止客户端 HTTPS，**回源走 HTTP** 到你的源站；源站用 Caddy 在 `:80` 反代到只监听本地的 app。这样 app 不直接对公网暴露，TLS 全交给 CDN。
+
+```
+客户端 ──HTTPS──▶ EO/CDN(边缘终止TLS) ──HTTP回源──▶ Caddy(:80) ──▶ app(127.0.0.1:7878)
+```
+
+**1. app 只监听本地** —— `config/config.mirror.json` 里设 `"host": "127.0.0.1"`，这样只有 Caddy 能访问它，`:7878` 不对公网开放。
+
+**2. systemd 守护 app**（`/etc/systemd/system/mirror.service`）：
+
+```ini
+[Unit]
+Description=mirror-karinjs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mirror
+ExecStart=/opt/mirror/mirror
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now mirror
+```
+
+**3. 安装 Caddy 并反代**（`/etc/caddy/Caddyfile`）。因为域名 DNS 指向 CDN（不指向源站），源站签不了证书，所以 **`auto_https off`、只服务 HTTP**：
+
+```caddyfile
+{
+	auto_https off
+}
+
+http://mirror.example.com {
+	reverse_proxy 127.0.0.1:7878
+}
+```
+
+```bash
+systemctl reload caddy
+```
+
+**4. CDN 回源配置（关键）**：在 EO/CDN 控制台把**源站设为你的服务器公网 IP、回源协议 HTTP、端口 80**。
+
+> ⚠️ 若回源走 HTTPS/“协议跟随”，会打到源站 `:443`（没东西）一直等超时，表现为**访问极慢（几十秒）**。务必用 HTTP:80。
+
+**5.（可选）只让 CDN 回源进来，挡掉爬虫直连源站**
+
+EdgeOne 回源时会自动带 `Cdn-Loop: TencentEdgeOne` 头，直连/爬虫没有。据此放行：
+
+```caddyfile
+{
+	auto_https off
+}
+
+:80 {
+	@eo header Cdn-Loop *TencentEdgeOne*
+	@health path /healthz
+
+	handle @health { reverse_proxy 127.0.0.1:7878 }   # 健康检查放行
+	handle @eo     { reverse_proxy 127.0.0.1:7878 }   # 经 CDN 的流量放行
+	handle         { respond 403 }                    # 其余(直连/扫描)一律 403
+}
+```
+
+> `Cdn-Loop` 非加密、可伪造，能挡住全网扫描/爬虫，但挡不住“已知源站 IP 且知道你用 EO 还故意伪造头”的针对性绕过。要更强：
+> - **密钥回源头**：CDN 规则引擎给回源加一个秘密请求头，把上面 `@eo` 改成 `header X-Origin-Secret "<秘密值>"`；
+> - **源站防火墙**：用 [`originProtection`](#originprotection--eo-源站保护自动同步仅源码功能默认关闭) 自动拉 EO 回源 IP 段写进 nftables，从网络层只放行 CDN 回源 IP。
+
 ## 快速开始（开发）
 
 ### 环境要求
