@@ -90,6 +90,49 @@ impl Default for ConfigSyncConfig {
     }
 }
 
+/// Tencent EdgeOne "origin protection" (源站保护) auto-pull.
+///
+/// When enabled, the app periodically calls the EO `DescribeOriginACL` API for
+/// the configured `zoneId` and writes EO's back-to-origin IP ranges into an
+/// nftables ruleset, so only EO 回源 can reach the guarded ports. Requires the
+/// app to run as root on Linux with `nft` available. Credentials are sensitive;
+/// the merged config file is gitignored.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginProtectionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(rename = "zoneId", default)]
+    pub zone_id: String,
+    #[serde(rename = "secretId", default)]
+    pub secret_id: String,
+    #[serde(rename = "secretKey", default)]
+    pub secret_key: String,
+    /// How often to poll the EO API. EO recommends ~3 days.
+    #[serde(rename = "intervalSeconds", default = "default_origin_acl_interval")]
+    pub interval_seconds: u64,
+    /// Ports to guard (only EO 回源 IPs may reach these). Other ports (e.g. SSH)
+    /// are untouched.
+    #[serde(default = "default_origin_acl_ports")]
+    pub ports: Vec<u16>,
+}
+
+fn default_origin_acl_interval() -> u64 { 259_200 } // 3 days
+fn default_origin_acl_ports() -> Vec<u16> { vec![80, 443] }
+
+impl Default for OriginProtectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            zone_id: String::new(),
+            secret_id: String::new(),
+            secret_key: String::new(),
+            interval_seconds: default_origin_acl_interval(),
+            ports: default_origin_acl_ports(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -109,6 +152,8 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     #[serde(rename = "configSync", default)]
     pub config_sync: ConfigSyncConfig,
+    #[serde(rename = "originProtection", default)]
+    pub origin_protection: OriginProtectionConfig,
     #[serde(default)]
     pub whitelists: Whitelists,
 }
@@ -192,6 +237,14 @@ async fn generate_defaults(config_root: &Path) -> Result<()> {
             "enabled": false,
             "intervalSeconds": 300,
             "url": ""
+        },
+        "originProtection": {
+            "enabled": false,
+            "zoneId": "",
+            "secretId": "",
+            "secretKey": "",
+            "intervalSeconds": 259200,
+            "ports": [80, 443]
         },
         "whitelists": {
             "avatar": ["karinjs"],

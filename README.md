@@ -231,6 +231,40 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 
 > **托管提示**：GitHub **raw**（`raw.githubusercontent.com`，返回 `text/plain`）、jsDelivr、GitHub Pages、Cloudflare、对象存储等均可。注意 jsDelivr 有 ~12h 缓存；GitHub raw 实时但 `Content-Type` 为 `text/plain`（已被接受）。
 
+### originProtection — EO 源站保护自动同步（仅源码功能，默认关闭）
+
+只让 EdgeOne 回源能进来：定时调用 EO `DescribeOriginACL` 拉取回源 IP 段，写进 nftables，只放行 EO + loopback 到指定端口，其余到这些端口的连接一律丢弃（扫描者看到端口"关闭"）。SSH 等其它端口不受影响。
+
+```json
+{
+  "originProtection": {
+    "enabled": false,
+    "zoneId": "zone-xxxxxxxx",
+    "secretId": "",
+    "secretKey": "",
+    "intervalSeconds": 259200,
+    "ports": [80, 443]
+  }
+}
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `originProtection.enabled` | bool | `false` | 是否启用 |
+| `originProtection.zoneId` | string | `""` | EO 站点 ID（`zone-xxxx`） |
+| `originProtection.secretId` | string | `""` | 腾讯云 API SecretId（建议最小权限 CAM，仅 `teo:DescribeOriginACL`） |
+| `originProtection.secretKey` | string | `""` | 腾讯云 API SecretKey |
+| `originProtection.intervalSeconds` | number | `259200` | 拉取间隔（秒），EO 建议约 3 天 |
+| `originProtection.ports` | number[] | `[80, 443]` | 受保护端口（只放行 EO 回源到这些端口） |
+
+**前提与说明：**
+
+- 仅 **Linux + root + `nft`** 可用；非 Linux 会记告警并跳过。
+- 仅 `zoneId` 不够 —— `DescribeOriginACL` 需要 API 密钥签名（TC3-HMAC-SHA256）。
+- 单独建表 `inet origin_guard`（input hook，policy accept），只对配置端口做丢弃，**不会影响 SSH**。
+- 凭据敏感：`config.mirror.json` 已默认 gitignore，请勿提交。
+- 与"密钥回源头部 + app `auth`"互补：前者网络层挡扫描，后者应用层校验。
+
 ## 路由说明
 
 | 路由 | 格式 | 示例 |

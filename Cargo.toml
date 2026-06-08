@@ -21,6 +21,7 @@ bytes = "1.11"
 http = "1.4"
 mime_guess = "2.0"
 sha2 = "0.10"
+hmac = "0.12"
 rust-embed = { version = "8.11.0", features = ["axum"]}
 dashmap = "6.2.1"
 

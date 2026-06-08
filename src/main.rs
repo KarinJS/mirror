@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod geo;
 mod http_utils;
+mod origin_acl;
 mod proxy;
 mod routes;
 mod server;

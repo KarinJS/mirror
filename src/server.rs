@@ -2,6 +2,7 @@ use crate::config::AppState;
 use crate::error::{AppError, AppResult};
 use crate::geo::check_geo;
 use crate::http_utils::get_client_country;
+use crate::origin_acl;
 use crate::routes;
 use crate::stats::{RouteBucket, Stats};
 use crate::sync;
@@ -110,6 +111,7 @@ pub async fn run() -> anyhow::Result<()> {
         .build()?;
 
     let sync_client = reqwest::Client::builder().build()?;
+    let origin_acl_client = reqwest::Client::builder().build()?;
 
     let config = state.config.read().await;
     let host = config.host.clone();
@@ -156,6 +158,18 @@ pub async fn run() -> anyhow::Result<()> {
                 tracing::error!("config sync task panicked: {:?}", e.into_panic());
             }
             Err(e) => tracing::error!("config sync task join error: {e}"),
+        }
+    });
+
+    // EO origin-protection auto-pull (off unless originProtection.enabled).
+    let acl_handle = tokio::spawn(origin_acl::origin_protection_task(state.clone(), origin_acl_client));
+    tokio::spawn(async move {
+        match acl_handle.await {
+            Ok(()) => tracing::warn!("origin protection task exited unexpectedly"),
+            Err(e) if e.is_panic() => {
+                tracing::error!("origin protection task panicked: {:?}", e.into_panic());
+            }
+            Err(e) => tracing::error!("origin protection task join error: {e}"),
         }
     });
 
