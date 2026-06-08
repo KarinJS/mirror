@@ -67,16 +67,16 @@ jobs:
           cache: true
           prefix-key: ${{ env.APP_NAME }}
 
-      - name: 构建
-        shell: bash
-        run: |
-          cargo build --release --target ${{ matrix.platform.target }}
-
       - name: 下载 WebUI 产物
         uses: actions/download-artifact@v7
         with:
           name: webui-dist
-          path: webui-dist/
+          path: webui/dist/
+
+      - name: 构建
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 打包发布文件
         shell: pwsh
@@ -85,7 +85,7 @@ jobs:
           $pkg = "${{ env.APP_NAME }}-${{ matrix.platform.label }}"
           New-Item -ItemType Directory -Force "$pkg/webui" | Out-Null
           Copy-Item "target/$target/release/${{ env.APP_NAME }}.exe" "$pkg/"
-          Copy-Item -Recurse webui-dist/* "$pkg/webui/"
+          Copy-Item -Recurse webui/dist/* "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -120,16 +120,16 @@ jobs:
           cache: true
           prefix-key: ${{ env.APP_NAME }}
 
-      - name: 构建
-        shell: bash
-        run: |
-          cargo build --release --target ${{ matrix.platform.target }}
-
       - name: 下载 WebUI 产物
         uses: actions/download-artifact@v7
         with:
           name: webui-dist
-          path: webui-dist/
+          path: webui/dist/
+
+      - name: 构建
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 打包发布文件
         run: |
@@ -138,7 +138,7 @@ jobs:
           pkg="${{ env.APP_NAME }}-${label}"
           mkdir -p "$pkg/webui"
           cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
-          cp -r webui-dist/. "$pkg/webui/"
+          cp -r webui/dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -174,16 +174,16 @@ jobs:
           cache: true
           prefix-key: ${{ env.APP_NAME }}
 
-      - name: 构建
-        shell: bash
-        run: |
-          cargo build --release --target ${{ matrix.platform.target }}
-
       - name: 下载 WebUI 产物
         uses: actions/download-artifact@v7
         with:
           name: webui-dist
-          path: webui-dist/
+          path: webui/dist/
+
+      - name: 构建
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.platform.target }}
 
       - name: 打包发布文件
         run: |
@@ -192,7 +192,7 @@ jobs:
           pkg="${{ env.APP_NAME }}-${label}"
           mkdir -p "$pkg/webui"
           cp "target/${target}/release/${{ env.APP_NAME }}" "$pkg/"
-          cp -r webui-dist/. "$pkg/webui/"
+          cp -r webui/dist/. "$pkg/webui/"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
