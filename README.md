@@ -271,7 +271,12 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 
 ### configSync — 远程配置自动同步
 
-配置同步功能可以定时从一个远程直链 URL 拉取 `config.mirror.json`，通过 SHA-256 比对检测变更，自动热更新内存中的**白名单**，无需重启服务。
+配置同步功能可以定时从一个远程直链 URL 拉取**白名单**，通过 SHA-256 比对检测变更，自动热更新内存中的白名单，无需重启服务。
+
+同步源可以是：
+
+- **纯白名单文件**（推荐，如 `whitelists.json`，内容只有 5 个白名单子键）—— **公开源用这个，绝不暴露任何应用配置**；
+- 整份 `config.mirror.json`（只取其中的 `whitelists`，向后兼容）。
 
 > **安全边界**：远程同步**只采用 `whitelists` 部分**。`auth` / `host` / `port` / `geo` / `configSync` 等始终使用本地值，远程**永远无法**关闭鉴权、修改监听地址或改写同步目标。即使同步源被攻陷，最坏也只能改动白名单（而白名单仍受各路由的 SSRF / 路径校验约束）。
 
@@ -280,7 +285,7 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
   "configSync": {
     "enabled": false,
     "intervalSeconds": 300,
-    "url": "https://example.com/configs/config.mirror.json"
+    "url": "https://example.com/whitelists.json"
   }
 }
 ```
@@ -289,14 +294,14 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 |------|------|--------|------|
 | `configSync.enabled` | bool | `false` | 是否启用远程同步 |
 | `configSync.intervalSeconds` | number | `300` | 检查间隔（秒），最小值为 1 |
-| `configSync.url` | string | `""` | 远程 `config.mirror.json` 的直链 URL |
+| `configSync.url` | string | `""` | 远程白名单文件（或整份 `config.mirror.json`）的直链 URL |
 
 **工作流程：**
 
 1. 每隔 `intervalSeconds` 秒，对配置的 `url` 发起一次 HTTP GET 请求
 2. **校验响应 `Content-Type`**：接受 JSON 类型（`application/json` / `text/json` / `*+json`）**以及 `text/plain`**（GitHub raw 等静态托管会把 `.json` 返回成 `text/plain`）；`text/html`（被劫持的登录页）、二进制等直接拒绝。这只是粗筛，响应体随后仍会被完整解析并按 config 校验
 3. 计算响应体的 SHA-256，与上次成功采用的哈希比对；相同则跳过
-4. 若不同 → 完整解析并校验整份配置（结构 + 语义）→ 取其 `whitelists` 与**本地**应用设置合并 → 写入本地文件 → 热更新内存白名单
+4. 若不同 → 解析校验（裸 `whitelists` 对象，或整份 config 取其 `whitelists`）→ 与**本地**应用设置合并 → 写入本地文件 → 热更新内存白名单
 5. 若请求失败 / 非 JSON / 校验失败 → 记录告警日志，本地文件与内存配置均不受影响，下个周期重试
 
 **安全特性：**
@@ -307,6 +312,8 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 - 同步 URL 经过 SSRF / DNS 重绑定防护校验（必须 https、禁止内网/环回/userinfo）
 
 > **托管提示**：GitHub **raw**（`raw.githubusercontent.com`，返回 `text/plain`）、jsDelivr、GitHub Pages、Cloudflare、对象存储等均可。注意 jsDelivr 有 ~12h 缓存；GitHub raw 实时但 `Content-Type` 为 `text/plain`（已被接受）。
+>
+> **公开同步源请发布纯 `whitelists.json`**（只含 5 个白名单子键），不要发布整份 `config.mirror.json`，以免把 `host`/`port`/`auth` 等应用配置暴露到公开仓库/分支。
 
 ### originProtection — EO 源站保护自动同步（仅源码功能，默认关闭）
 
