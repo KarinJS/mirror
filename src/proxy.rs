@@ -119,7 +119,8 @@ pub async fn proxy_upstream(
 
     let upstream = send_with_retry(client, request, target, retries).await?;
 
-    if let Some(cl) = upstream.headers().get("content-length") {
+    let upstream_content_length = upstream.headers().get("content-length").cloned();
+    if let Some(cl) = &upstream_content_length {
         if let Ok(size_str) = cl.to_str() {
             if let Ok(size) = size_str.parse::<usize>() {
                 if size > limit {
@@ -150,6 +151,15 @@ pub async fn proxy_upstream(
 
     // Security headers to prevent MIME type sniffing
     out_headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+
+    // Forward the upstream Content-Length so clients can show download size/
+    // progress, and so CDNs can cache the response instead of treating it as a
+    // chunked, uncacheable stream. The body is identity-encoded and not
+    // transformed, and any present length is already ≤ limit (checked above),
+    // so the streamed body length matches this header.
+    if let Some(cl) = upstream_content_length {
+        out_headers.insert("content-length", cl);
+    }
 
     let body_stream = upstream.bytes_stream();
     let limited_stream = body_stream.scan(0usize, move |total, chunk| {
