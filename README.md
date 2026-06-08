@@ -76,7 +76,7 @@ tail -f logs/mirror.log
 客户端 ──HTTPS──▶ EO/CDN(边缘终止TLS) ──HTTP回源──▶ Caddy(:80) ──▶ app(127.0.0.1:7878)
 ```
 
-**1. app 只监听本地** —— `config/config.mirror.json` 里设 `"host": "127.0.0.1"`，这样只有 Caddy 能访问它，`:7878` 不对公网开放。
+**1. app 只监听本地** —— `config/config.json` 里设 `"host": "127.0.0.1"`，这样只有 Caddy 能访问它，`:7878` 不对公网开放。
 
 **2. systemd 守护 app**（`/etc/systemd/system/mirror.service`）：
 
@@ -173,13 +173,18 @@ pnpm build:frontend  # → webui/dist/
 
 ## 配置详解
 
-所有配置集中在项目根目录的 `config/config.mirror.json` 这一个文件中（包含应用设置与全部白名单）。首次运行时若该文件不存在，程序会自动创建并填充默认配置。
+配置分成两个文件，都在 `config/` 下，首次运行缺哪个就自动生成哪个：
 
-> 该文件可能包含鉴权凭据，已默认加入 `.gitignore`，请勿提交到版本库。
+| 文件 | 内容 | 是否含密钥 | 版本库 |
+|------|------|-----------|--------|
+| **`config.json`** | 应用设置（host/port/auth/geo/cacheTTL/cors/configSync/originProtection） | 可能有（auth 等） | **已 gitignore，勿提交** |
+| **`config.mirror.json`** | 全部白名单（avatar/raw/releases/unpkg/mirror） | 无 | 可提交 / 可公开 / 作同步源 |
 
-### 应用设置
+> 两者分开，是为了让"可公开共享的白名单"和"私有的应用配置（含密钥）"互不混淆——同步源只需发布 `config.mirror.json`。
 
-文件顶层为应用运行参数：
+### config.json — 应用设置
+
+顶层为应用运行参数：
 
 | 字段 | 类型 | 默认值 | 单位 | 说明 |
 |------|------|--------|------|------|
@@ -213,56 +218,54 @@ pnpm build:frontend  # → webui/dist/
 | `0` | `no-store` | 禁止缓存 |
 | `> 0` | `public, max-age=<ttl>` | 自定义缓存时长（**单位：秒**） |
 
-### whitelists — 白名单
+### config.mirror.json — 白名单
 
-文件中的 `whitelists` 对象集中保存全部白名单，包含 5 个子键：`avatar` / `raw` / `releases` / `unpkg` / `mirror`。各子键省略时默认为空（即该路由拒绝全部请求）。
+整个文件就是白名单，5 个顶层子键：`avatar` / `raw` / `releases` / `unpkg` / `mirror`。各子键省略时默认为空（即该路由拒绝全部请求）。
 
 ```json
 {
-  "whitelists": {
-    "avatar": ["karinjs", "NapNeko"],
-    "raw": {
-      "karinjs": {
-        "karin": [
-          { "branch": "HEAD", "file": "package.json" },
-          { "branch": "main", "file": "README.md" }
-        ]
-      }
-    },
-    "releases": {
-      "NapNeko": {
-        "NapCatQQ": ["NapCat.Framework.zip", "NapCat.linux-amd64"]
-      }
-    },
-    "unpkg": {
-      "karin": ["package.json", "dist/karin.umd.js"]
-    },
-    "mirror": {
-      "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0,
-      "https://example.com/stable/asset.zip": -1,
-      "https://example.com/dynamic/data.json": { "ttl": 60, "maxSize": 1048576 }
+  "avatar": ["karinjs", "NapNeko"],
+  "raw": {
+    "karinjs": {
+      "karin": [
+        { "branch": "HEAD", "file": "package.json" },
+        { "branch": "main", "file": "README.md" }
+      ]
     }
+  },
+  "releases": {
+    "NapNeko": {
+      "NapCatQQ": ["NapCat.Framework.zip", "NapCat.linux-amd64"]
+    }
+  },
+  "unpkg": {
+    "karin": ["package.json", "dist/karin.umd.js"]
+  },
+  "mirror": {
+    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0,
+    "https://example.com/stable/asset.zip": -1,
+    "https://example.com/dynamic/data.json": { "ttl": 60, "maxSize": 1048576 }
   }
 }
 ```
 
-#### `whitelists.avatar` — GitHub 头像白名单
+#### `avatar` — GitHub 头像白名单
 
 字符串数组，每个元素是一个允许代理头像的 GitHub 用户名。请求 `/avatar/<user>.png` 时检查 `<user>` 是否命中，命中则代理 `https://github.com/<user>.png`。
 
-#### `whitelists.raw` — GitHub Raw 文件白名单
+#### `raw` — GitHub Raw 文件白名单
 
 三层嵌套结构 `{owner: {repo: [{branch, file}]}}`。请求 `/raw/<owner>/<repo>/<branch>/<file>` 时精确匹配；`branch` 为 `"HEAD"` 表示接受任何分支。
 
-#### `whitelists.releases` — GitHub Releases 白名单
+#### `releases` — GitHub Releases 白名单
 
 三层嵌套结构 `{owner: {repo: [asset_filename]}}`。请求 `/gh/<owner>/<repo>/releases/download/<tag>/<file>` 时校验 `<file>` 是否存在于对应仓库的允许列表中。
 
-#### `whitelists.unpkg` — npm/unpkg 白名单
+#### `unpkg` — npm/unpkg 白名单
 
 `{package_name: [file_paths]}`。请求 `/unpkg/<pkg>[@version]/<file>` 时校验文件路径是否在白名单中，支持版本号或版本范围。
 
-#### `whitelists.mirror` — 自定义镜像白名单
+#### `mirror` — 自定义镜像白名单
 
 URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 
@@ -271,21 +274,16 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 
 ### configSync — 远程配置自动同步
 
-配置同步功能可以定时从一个远程直链 URL 拉取**白名单**，通过 SHA-256 比对检测变更，自动热更新内存中的白名单，无需重启服务。
+配置同步功能（配置在 `config.json` 的 `configSync` 里）可以定时从一个远程直链 URL 拉取**白名单文件**（即 `config.mirror.json` 那种纯白名单 JSON），通过 SHA-256 比对检测变更，自动热更新内存中的白名单并写回本地 `config.mirror.json`，无需重启服务。
 
-同步源可以是：
-
-- **纯白名单文件**（推荐，如 `whitelists.json`，内容只有 5 个白名单子键）—— **公开源用这个，绝不暴露任何应用配置**；
-- 整份 `config.mirror.json`（只取其中的 `whitelists`，向后兼容）。
-
-> **安全边界**：远程同步**只采用 `whitelists` 部分**。`auth` / `host` / `port` / `geo` / `configSync` 等始终使用本地值，远程**永远无法**关闭鉴权、修改监听地址或改写同步目标。即使同步源被攻陷，最坏也只能改动白名单（而白名单仍受各路由的 SSRF / 路径校验约束）。
+> **安全边界**：同步**只涉及白名单**。`config.json` 里的 `auth` / `host` / `port` / `geo` / `configSync` 等应用设置**完全不参与同步**，远程**永远无法**关闭鉴权、改监听地址或改写同步目标。即使同步源被攻陷，最坏也只能改白名单（而白名单仍受各路由的 SSRF / 路径校验约束）。同步源是纯白名单，本身也不含任何应用配置。
 
 ```json
 {
   "configSync": {
     "enabled": false,
     "intervalSeconds": 300,
-    "url": "https://example.com/whitelists.json"
+    "url": "https://example.com/config.mirror.json"
   }
 }
 ```
@@ -294,26 +292,24 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 |------|------|--------|------|
 | `configSync.enabled` | bool | `false` | 是否启用远程同步 |
 | `configSync.intervalSeconds` | number | `300` | 检查间隔（秒），最小值为 1 |
-| `configSync.url` | string | `""` | 远程白名单文件（或整份 `config.mirror.json`）的直链 URL |
+| `configSync.url` | string | `""` | 远程白名单文件（纯 `config.mirror.json`）的直链 URL |
 
 **工作流程：**
 
 1. 每隔 `intervalSeconds` 秒，对配置的 `url` 发起一次 HTTP GET 请求
-2. **校验响应 `Content-Type`**：接受 JSON 类型（`application/json` / `text/json` / `*+json`）**以及 `text/plain`**（GitHub raw 等静态托管会把 `.json` 返回成 `text/plain`）；`text/html`（被劫持的登录页）、二进制等直接拒绝。这只是粗筛，响应体随后仍会被完整解析并按 config 校验
+2. **校验响应 `Content-Type`**：接受 JSON 类型（`application/json` / `text/json` / `*+json`）**以及 `text/plain`**（GitHub raw 等静态托管会把 `.json` 返回成 `text/plain`）；`text/html`（被劫持的登录页）、二进制等直接拒绝。这只是粗筛，响应体随后仍会被完整按白名单结构解析
 3. 计算响应体的 SHA-256，与上次成功采用的哈希比对；相同则跳过
-4. 若不同 → 解析校验（裸 `whitelists` 对象，或整份 config 取其 `whitelists`）→ 与**本地**应用设置合并 → 写入本地文件 → 热更新内存白名单
-5. 若请求失败 / 非 JSON / 校验失败 → 记录告警日志，本地文件与内存配置均不受影响，下个周期重试
+4. 若不同 → 按白名单解析校验 → 写入本地 `config.mirror.json` → 热更新内存白名单
+5. 若请求失败 / 非 JSON / 校验失败 → 记录告警日志，本地白名单与应用配置均不受影响，下个周期重试
 
 **安全特性：**
 
-- 远程仅能影响白名单；`auth` / `host` / `port` / `geo` / `configSync` 恒为本地值
-- `Content-Type` 粗筛（拒绝 HTML/二进制）+ 完整结构/语义校验，无效或被劫持（如返回登录页）的响应一律拒绝，绝不写入磁盘
+- 同步只影响白名单；`config.json` 里的应用设置（`auth`/`host`/`port`/`geo`/`configSync`…）完全不参与
+- `Content-Type` 粗筛（拒绝 HTML/二进制）+ 白名单结构校验，无效或被劫持（如返回登录页）的响应一律拒绝，绝不写入磁盘
 - 网络错误 / 非 2xx 状态码 / 超出 10 MB 体积上限均记录告警，不影响服务正常运行
 - 同步 URL 经过 SSRF / DNS 重绑定防护校验（必须 https、禁止内网/环回/userinfo）
 
-> **托管提示**：GitHub **raw**（`raw.githubusercontent.com`，返回 `text/plain`）、jsDelivr、GitHub Pages、Cloudflare、对象存储等均可。注意 jsDelivr 有 ~12h 缓存；GitHub raw 实时但 `Content-Type` 为 `text/plain`（已被接受）。
->
-> **公开同步源请发布纯 `whitelists.json`**（只含 5 个白名单子键），不要发布整份 `config.mirror.json`，以免把 `host`/`port`/`auth` 等应用配置暴露到公开仓库/分支。
+> **托管提示**：GitHub **raw**（`raw.githubusercontent.com`，返回 `text/plain`）、jsDelivr、GitHub Pages、Cloudflare、对象存储等均可。注意 jsDelivr 有 ~12h 缓存；GitHub raw 实时但 `Content-Type` 为 `text/plain`（已被接受）。同步源就是 `config.mirror.json`（纯白名单），本身不含任何应用配置。
 
 ### originProtection — EO 源站保护自动同步（仅源码功能，默认关闭）
 
@@ -346,7 +342,7 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 - 仅 **Linux + root + `nft`** 可用；非 Linux 会记告警并跳过。
 - 仅 `zoneId` 不够 —— `DescribeOriginACL` 需要 API 密钥签名（TC3-HMAC-SHA256）。
 - 单独建表 `inet origin_guard`（input hook，policy accept），只对配置端口做丢弃，**不会影响 SSH**。
-- 凭据敏感：`config.mirror.json` 已默认 gitignore，请勿提交。
+- 凭据敏感：`config.json` 已默认 gitignore，请勿提交。
 - 与"密钥回源头部 + app `auth`"互补：前者网络层挡扫描，后者应用层校验。
 
 ## 路由说明
@@ -377,8 +373,8 @@ URL 到规则（TTL 或 `{ttl, maxSize?}`）的映射。
 后端返回正确的 `Cache-Control` 头，适配 CDN 集成：
 
 - **Releases**（`ttl: -1`）：`public, max-age=31536000, immutable`
-- **Raw / Avatar / unpkg**：由 `config.mirror.json` 中 `cacheTTL` 对应字段控制
-- **Mirror**：由 `whitelists.mirror` 中按 URL 配置的 TTL 控制
+- **Raw / Avatar / unpkg**：由 `config.json` 中 `cacheTTL` 对应字段控制
+- **Mirror**：由 `config.mirror.json` 中 `mirror` 下按 URL 配置的 TTL 控制
 - **不缓存**（`ttl: 0`）：`no-store`
 
 ### EO CDN 配置建议
