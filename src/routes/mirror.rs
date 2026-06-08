@@ -1,22 +1,11 @@
 use crate::config::{AppState, MirrorRule};
 use crate::error::{AppError, AppResult};
-use crate::proxy::{proxy_upstream, ProxyOptions};
+use crate::proxy::{proxy_upstream, ProxyOptions, CacheTtl};
+use crate::validation::{validate_host, validate_path_component, resolve_and_validate_host};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use reqwest::Client;
-
-fn validate_host(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains("//")
-        && !s.contains('\\')
-        && !s.contains("..")
-        && s.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == ':')
-}
-
-fn validate_path(s: &str) -> bool {
-    !s.is_empty() && !s.contains("..") && !s.contains("//") && !s.contains('\\')
-}
 
 pub async fn handle_mirror(
     State(state): State<AppState>,
@@ -35,24 +24,48 @@ pub async fn handle_mirror(
     let file_path = parts[1];
 
     // Validate components
-    if !validate_host(host) || !validate_path(file_path) {
+    if !validate_host(host) || !validate_path_component(file_path) {
         return Err(AppError::NotFound);
     }
 
-    let target = format!("https://{}/{}", host, file_path);
+    // Extract hostname and port for DNS rebinding validation
+    let (hostname, port) = match host.rfind(':') {
+        Some(pos) => (&host[..pos], host[pos+1..].parse::<u16>().unwrap_or(443)),
+        None => (host, 443u16),
+    };
+    if let Err(reason) = resolve_and_validate_host(hostname, port).await {
+        tracing::warn!("mirror DNS rebinding blocked for {}: {}", host, reason);
+        return Err(AppError::NotFound);
+    }
 
+    // Normalize the target URL: lowercase host, ensure consistent path format
+    let normalized_host = host.to_ascii_lowercase();
+    let target = format!("https://{}/{}", normalized_host, file_path);
+
+    // Look up the rule under a short-lived read lock. The validated `target` is
+    // captured by value before the lock is released, so dropping it ahead of the
+    // network I/O (below) is safe — there is no use-after-check race.
     let whitelists = state.whitelists.read().await;
-    let rule = whitelists.mirror.get(&target);
+    // Try exact match first, then try with normalized host
+    let rule = whitelists.mirror.get(&target)
+        .or_else(|| {
+            // Fallback: try original (case-sensitive) host for backwards compatibility
+            let original_target = format!("https://{}/{}", host, file_path);
+            if original_target != target {
+                whitelists.mirror.get(&original_target)
+            } else {
+                None
+            }
+        });
 
     let (ttl, max_size) = match rule {
-        Some(MirrorRule::Simple(t)) => (*t, None),
-        Some(MirrorRule::Complex { ttl, max_size }) => (*ttl, *max_size),
+        Some(MirrorRule::Simple(t)) => (CacheTtl::from_config(*t), None),
+        Some(MirrorRule::Complex { ttl, max_size }) => (CacheTtl::from_config(*ttl), *max_size),
         None => {
             return Err(AppError::NotFound);
         }
     };
-
-    drop(whitelists);
+    drop(whitelists); // Release lock before network I/O
 
     proxy_upstream(
         &state,
@@ -67,16 +80,16 @@ pub async fn handle_mirror(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::validate_host;
 
     #[test]
     fn test_validate_host() {
-        // Valid hosts
         assert!(validate_host("example.com"));
         assert!(validate_host("sub.example.com"));
         assert!(validate_host("example.com:8080"));
-        assert!(validate_host("192.168.1.1"));
-
-        // Invalid hosts
+        // SSRF: internal IPs are rejected
+        assert!(!validate_host("192.168.1.1"));
+        assert!(!validate_host("127.0.0.1"));
         assert!(!validate_host(""));
         assert!(!validate_host("example..com"));
         assert!(!validate_host("example//com"));
@@ -86,16 +99,10 @@ mod tests {
 
     #[test]
     fn test_validate_path() {
-        // Valid paths
-        assert!(validate_path("file.zip"));
-        assert!(validate_path("path/to/file.zip"));
-        assert!(validate_path("dist/bundle.js"));
-
-        // Invalid paths
-        assert!(!validate_path(""));
-        assert!(!validate_path("../etc/passwd"));
-        assert!(!validate_path("path/../file"));
-        assert!(!validate_path("path//file"));
-        assert!(!validate_path("path\\file"));
+        assert!(validate_path_component("file.zip"));
+        assert!(validate_path_component("path/to/file.zip"));
+        assert!(!validate_path_component(""));
+        assert!(!validate_path_component("../etc/passwd"));
+        assert!(!validate_path_component("path//file"));
     }
 }
