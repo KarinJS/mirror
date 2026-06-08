@@ -1,6 +1,6 @@
 use crate::config::AppState;
 use crate::error::{AppError, AppResult};
-use crate::proxy::{proxy_upstream, ProxyOptions};
+use crate::proxy::{proxy_upstream, ProxyOptions, CacheTtl};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -9,7 +9,7 @@ use reqwest::Client;
 fn validate_username(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 39
-        && s.chars().all(|c| c.is_alphanumeric() || c == '-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !s.starts_with('-')
         && !s.ends_with('-')
 }
@@ -22,15 +22,16 @@ pub async fn handle_avatar(
 ) -> AppResult<Response> {
     // Path format: /avatar/<user>.png
     let user = path
-        .trim_start_matches("/avatar/")
-        .trim_end_matches(".png");
+        .strip_prefix("/avatar/")
+        .and_then(|s| s.strip_suffix(".png"))
+        .ok_or(AppError::NotFound)?;
 
     if !validate_username(user) {
         return Err(AppError::NotFound);
     }
 
     let whitelists = state.whitelists.read().await;
-    let allowed = whitelists.avatar.contains(&user.to_string());
+    let allowed = whitelists.avatar.iter().any(|u| u == user);
 
     if !allowed {
         return Err(AppError::NotFound);
@@ -39,7 +40,7 @@ pub async fn handle_avatar(
     let target = format!("https://github.com/{}.png", user);
 
     let config = state.config.read().await;
-    let ttl = config.cache_ttl.avatar;
+    let ttl = CacheTtl::from_config(config.cache_ttl.avatar);
     drop(config);
 
     proxy_upstream(
@@ -79,6 +80,10 @@ mod tests {
         assert!(!validate_username("has/slash"));
         // over 39 chars
         assert!(!validate_username(&"a".repeat(40)));
+        // Unicode characters (Chinese, Cyrillic, emoji) must be rejected
+        assert!(!validate_username("用户名"));
+        assert!(!validate_username("кириллица"));
+        assert!(!validate_username("🎉party"));
     }
 
     // ── path parsing ─────────────────────────────────────────────────────

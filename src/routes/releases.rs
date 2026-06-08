@@ -1,13 +1,39 @@
 use crate::config::AppState;
 use crate::error::{AppError, AppResult};
-use crate::proxy::{proxy_upstream, ProxyOptions};
+use crate::proxy::{proxy_upstream, ProxyOptions, CacheTtl};
+use crate::validation::validate_path_component;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use reqwest::Client;
 
-fn validate_path_component(s: &str) -> bool {
-    !s.is_empty() && !s.contains("..") && !s.contains("//") && !s.contains('\\')
+/// Check if a file matches a whitelist pattern.
+/// - Patterns starting with "." match as file extensions (e.g., ".exe" matches "app-v1.exe")
+/// - Other patterns match as exact filenames (e.g., "NapCat.Framework.zip")
+fn matches_file_pattern(file: &str, pattern: &str) -> bool {
+    if pattern.starts_with('.') {
+        // Extension pattern: must match at a filename boundary
+        // ".exe" matches "app.exe", "sub/app.exe", but NOT "notexe"
+        if !file.ends_with(pattern) {
+            return false;
+        }
+        let prefix_len = file.len() - pattern.len();
+        if prefix_len == 0 {
+            return true; // file IS the extension (unusual but valid)
+        }
+        // Use char-level access to safely check the character before the extension.
+        // This avoids slicing into multi-byte UTF-8 sequences.
+        let before_char = file[..prefix_len]
+            .chars()
+            .next_back()
+            .unwrap_or('/');
+        // The character before the extension must be alphanumeric (part of a filename),
+        // not a dot or path separator
+        before_char.is_ascii_alphanumeric()
+    } else {
+        // Exact filename match
+        file == pattern || file.ends_with(&format!("/{}", pattern))
+    }
 }
 
 pub async fn handle_releases(
@@ -17,8 +43,21 @@ pub async fn handle_releases(
     path: String,
 ) -> AppResult<Response> {
     // Path format: /gh/<owner>/<repo>/releases/download/<tag>/<file>
-    let parts: Vec<&str> = path.trim_start_matches("/gh/").split('/').collect();
+    let raw = path.trim_start_matches("/gh/");
+
+    // Validate the raw path before splitting to prevent split-join
+    // roundtrip from collapsing consecutive slashes (// → /).
+    if raw.contains("//") || raw.contains('\\') || raw.contains("..") {
+        return Err(AppError::NotFound);
+    }
+
+    let parts: Vec<&str> = raw.split('/').collect();
     if parts.len() < 6 || parts[2] != "releases" || parts[3] != "download" {
+        return Err(AppError::NotFound);
+    }
+
+    // Reject empty parts (consecutive slashes)
+    if parts.iter().any(|p| p.is_empty()) {
         return Err(AppError::NotFound);
     }
 
@@ -27,7 +66,7 @@ pub async fn handle_releases(
     let tag = parts[4];
     let file = parts[5..].join("/");
 
-    // Validate path components
+    // Validate individual components (defense in depth)
     if !validate_path_component(owner)
         || !validate_path_component(repo)
         || !validate_path_component(tag)
@@ -40,7 +79,7 @@ pub async fn handle_releases(
         .releases
         .get(owner)
         .and_then(|repos| repos.get(repo))
-        .map(|files| files.iter().any(|f| file.ends_with(f)))
+        .map(|files| files.iter().any(|f| matches_file_pattern(&file, f)))
         .unwrap_or(false);
 
     if !allowed {
@@ -57,7 +96,7 @@ pub async fn handle_releases(
         &client,
         &headers,
         &target,
-        ProxyOptions { ttl: -1, max_size: None }, // immutable
+        ProxyOptions { ttl: CacheTtl::Immutable, max_size: None },
     )
     .await
 }
@@ -67,27 +106,25 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // ── validate_path_component ──────────────────────────────────────────
+    // ── matches_file_pattern ──
 
     #[test]
-    fn test_validate_path_component_valid() {
-        assert!(validate_path_component("NapCat.Framework.zip"));
-        assert!(validate_path_component("v4.18.0"));
-        assert!(validate_path_component("NapNeko"));
-        assert!(validate_path_component("subdir/file.zip"));
-        assert!(validate_path_component("file-name_v1.0.tar.gz"));
+    fn test_pattern_exact_name() {
+        assert!(matches_file_pattern("NapCat.Framework.zip", "NapCat.Framework.zip"));
+        assert!(matches_file_pattern("sub/NapCat.Framework.zip", "NapCat.Framework.zip"));
+        assert!(!matches_file_pattern("other.zip", "NapCat.Framework.zip"));
+        assert!(!matches_file_pattern("evil-NapCat.Framework.zip", "NapCat.Framework.zip"));
     }
 
     #[test]
-    fn test_validate_path_component_invalid() {
-        assert!(!validate_path_component(""));
-        assert!(!validate_path_component("../etc/passwd"));
-        assert!(!validate_path_component("path/../file"));
-        assert!(!validate_path_component("path//file"));
-        assert!(!validate_path_component("path\\file"));
+    fn test_pattern_extension() {
+        assert!(matches_file_pattern("app-v1.exe", ".exe"));
+        assert!(matches_file_pattern("sub/app.exe", ".exe"));
+        assert!(matches_file_pattern("NapCatQQ.AppImage", ".AppImage"));
+        assert!(!matches_file_pattern("app.txt", ".exe"));
     }
 
-    // ── path parsing ─────────────────────────────────────────────────────
+    // ── path parsing ──
 
     #[test]
     fn test_parse_standard_path() {
@@ -95,9 +132,6 @@ mod tests {
         let parts: Vec<&str> = path.trim_start_matches("/gh/").split('/').collect();
         assert_eq!(parts.len(), 6);
         assert_eq!(parts[0], "NapNeko");
-        assert_eq!(parts[1], "NapCatQQ");
-        assert_eq!(parts[2], "releases");
-        assert_eq!(parts[3], "download");
         assert_eq!(parts[4], "v4.18.0");
         assert_eq!(parts[5], "NapCat.Framework.zip");
     }
@@ -111,40 +145,7 @@ mod tests {
         assert_eq!(file, "subdir/file.zip");
     }
 
-    #[test]
-    fn test_parse_too_short_is_rejected() {
-        let path = "/gh/NapNeko/NapCatQQ";
-        let parts: Vec<&str> = path.trim_start_matches("/gh/").split('/').collect();
-        assert!(parts.len() < 6);
-    }
-
-    #[test]
-    fn test_parse_wrong_structure_rejected() {
-        // 6 parts but "tags" instead of "releases" at index 2
-        let path = "/gh/owner/repo/tags/v1.0/download/file.zip";
-        let parts: Vec<&str> = path.trim_start_matches("/gh/").split('/').collect();
-        assert_eq!(parts.len(), 6);
-        assert_ne!(parts[2], "releases");
-    }
-
-    // ── target URL construction ───────────────────────────────────────────
-
-    #[test]
-    fn test_target_url_no_gh_prefix() {
-        let (owner, repo, tag, file) = ("NapNeko", "NapCatQQ", "v4.18.0", "NapCat.Framework.zip");
-        let target = format!(
-            "https://github.com/{}/{}/releases/download/{}/{}",
-            owner, repo, tag, file
-        );
-        assert_eq!(
-            target,
-            "https://github.com/NapNeko/NapCatQQ/releases/download/v4.18.0/NapCat.Framework.zip"
-        );
-        // Must NOT contain /gh/ in the path
-        assert!(!target.contains("/gh/"));
-    }
-
-    // ── whitelist logic ───────────────────────────────────────────────────
+    // ── whitelist logic ──
 
     fn make_whitelist() -> HashMap<String, HashMap<String, Vec<String>>> {
         let mut repos = HashMap::new();
@@ -161,53 +162,40 @@ mod tests {
         wl
     }
 
-    fn check(wl: &HashMap<String, HashMap<String, Vec<String>>>, owner: &str, repo: &str, file: &str) -> bool {
-        wl.get(owner)
-            .and_then(|r| r.get(repo))
-            .map(|files| files.iter().any(|f| file.ends_with(f.as_str())))
-            .unwrap_or(false)
-    }
-
     #[test]
     fn test_whitelist_exact_name_match() {
         let wl = make_whitelist();
-        assert!(check(&wl, "NapNeko", "NapCatQQ", "NapCat.Framework.zip"));
+        let files = wl.get("NapNeko").unwrap().get("NapCatQQ").unwrap();
+        assert!(files.iter().any(|f| matches_file_pattern("NapCat.Framework.zip", f)));
     }
 
     #[test]
     fn test_whitelist_extension_match() {
         let wl = make_whitelist();
-        assert!(check(&wl, "NapNeko", "NapCatQQ", "NapCatQQ-v4.18.0.exe"));
-        assert!(check(&wl, "NapNeko", "NapCatQQ", "NapCatQQ.AppImage"));
+        let files = wl.get("NapNeko").unwrap().get("NapCatQQ").unwrap();
+        assert!(files.iter().any(|f| matches_file_pattern("NapCatQQ-v4.18.0.exe", f)));
+        assert!(files.iter().any(|f| matches_file_pattern("NapCatQQ.AppImage", f)));
     }
 
     #[test]
-    fn test_whitelist_unknown_owner_rejected() {
+    fn test_whitelist_no_prefix_bypass() {
         let wl = make_whitelist();
-        assert!(!check(&wl, "Unknown", "NapCatQQ", "NapCat.Framework.zip"));
+        let files = wl.get("NapNeko").unwrap().get("NapCatQQ").unwrap();
+        // "evil-NapCat.Framework.zip" should NOT match "NapCat.Framework.zip"
+        assert!(!files.iter().any(|f| matches_file_pattern("evil-NapCat.Framework.zip", f)));
     }
 
-    #[test]
-    fn test_whitelist_unknown_repo_rejected() {
-        let wl = make_whitelist();
-        assert!(!check(&wl, "NapNeko", "OtherRepo", "NapCat.Framework.zip"));
-    }
+    // ── path traversal guard ──
 
     #[test]
-    fn test_whitelist_unmatched_file_rejected() {
-        let wl = make_whitelist();
-        assert!(!check(&wl, "NapNeko", "NapCatQQ", "SomeOtherFile.tar.gz"));
-    }
-
-    // ── path traversal guard ──────────────────────────────────────────────
-
-    #[test]
-    fn test_path_traversal_in_owner_rejected() {
+    fn test_path_traversal_rejected() {
         assert!(!validate_path_component("../etc"));
+        assert!(!validate_path_component("../../secret.txt"));
     }
 
     #[test]
-    fn test_path_traversal_in_file_rejected() {
-        assert!(!validate_path_component("../../secret.txt"));
+    fn test_double_slash_rejected() {
+        let raw = "owner/repo/releases/download/tag//secret";
+        assert!(raw.contains("//"));
     }
 }

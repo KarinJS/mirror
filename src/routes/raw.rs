@@ -1,13 +1,21 @@
 use crate::config::AppState;
 use crate::error::{AppError, AppResult};
-use crate::proxy::{proxy_upstream, ProxyOptions};
+use crate::proxy::{proxy_upstream, ProxyOptions, CacheTtl};
+use crate::validation::validate_path_component;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use reqwest::Client;
 
-fn validate_path_component(s: &str) -> bool {
-    !s.is_empty() && !s.contains("..") && !s.contains("//") && !s.contains('\\')
+/// Check if a file path matches a whitelist rule with proper path boundary checking.
+/// - Rules ending with "/" match as directory prefixes (e.g., "src/" matches "src/index.ts" but not "src-evil/foo")
+/// - Other rules match as exact filenames at path boundaries (e.g., "package.json" matches "dir/package.json" but not "package.json.bak")
+fn matches_path_rule(file_path: &str, rule: &str) -> bool {
+    if rule.ends_with('/') {
+        file_path.starts_with(rule) || file_path == &rule[..rule.len() - 1]
+    } else {
+        file_path == rule || file_path.ends_with(&format!("/{}", rule))
+    }
 }
 
 pub async fn handle_raw(
@@ -42,7 +50,7 @@ pub async fn handle_raw(
         .and_then(|repos| repos.get(repo))
         .map(|rules| {
             rules.iter().any(|rule| {
-                rule.branch == branch && file_path.starts_with(&rule.file)
+                rule.branch == branch && matches_path_rule(file_path, &rule.file)
             })
         })
         .unwrap_or(false);
@@ -57,7 +65,7 @@ pub async fn handle_raw(
     );
 
     let config = state.config.read().await;
-    let ttl = config.cache_ttl.raw;
+    let ttl = CacheTtl::from_config(config.cache_ttl.raw);
     drop(config);
 
     proxy_upstream(
@@ -153,7 +161,7 @@ mod tests {
             .map(|rules| {
                 rules
                     .iter()
-                    .any(|rule| rule.branch == branch && file_path.starts_with(&rule.file))
+                    .any(|rule| rule.branch == branch && matches_path_rule(file_path, &rule.file))
             })
             .unwrap_or(false)
     }
@@ -195,6 +203,21 @@ mod tests {
         let wl = make_whitelist();
         // "dist/" is not in the whitelist
         assert!(!check(&wl, "karinjs", "karin", "main", "dist/bundle.js"));
+    }
+
+    #[test]
+    fn test_dir_prefix_boundary() {
+        // "src/" should NOT match "src-evil/foo" (path boundary check)
+        let wl = make_whitelist();
+        assert!(!check(&wl, "karinjs", "karin", "main", "src-evil/foo"));
+    }
+
+    #[test]
+    fn test_exact_file_no_suffix_bypass() {
+        // "package.json" should NOT match "package.json.bak"
+        let wl = make_whitelist();
+        assert!(!check(&wl, "karinjs", "karin", "HEAD", "package.json.bak"));
+        assert!(!check(&wl, "karinjs", "karin", "HEAD", "dir/package.json.bak"));
     }
 
     // ── target URL construction ───────────────────────────────────────────
