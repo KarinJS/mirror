@@ -1,4 +1,4 @@
-use crate::config::{parse_config, AppState, CONFIG_FILE};
+use crate::config::{parse_config, AppState, Whitelists, CONFIG_FILE};
 use crate::validation::validate_sync_url;
 use futures::StreamExt;
 use reqwest::header::CONTENT_TYPE;
@@ -39,25 +39,41 @@ fn is_acceptable_content_type(value: &str) -> bool {
     ) || essence.ends_with("+json")
 }
 
-/// Validate a freshly-fetched config document and apply ONLY its `whitelists`.
+/// Parse a synced body into whitelists.
 ///
-/// Security model: the remote sync source is treated as authoritative for the
-/// whitelists alone. App settings (`auth`, `host`, `port`, `geo`, `configSync`,
-/// …) always come from the local config and are never overwritten by a remote —
-/// so even a compromised sync source cannot disable auth, change the listen
-/// address, or redirect sync. The full document is still parsed and validated
-/// (structure + semantics) so a malformed or malicious payload is rejected
-/// before anything is written.
+/// Accepts EITHER a bare whitelists object (`{avatar, raw, releases, unpkg,
+/// mirror}`) OR a full `config.mirror.json` (from which only `whitelists` is
+/// taken). The bare form is preferred so a **public** sync source need only
+/// publish the whitelists and never exposes app settings (host/port/auth/…).
+pub fn parse_synced_whitelists(body: &str) -> Result<Whitelists, String> {
+    // Try the bare whitelists object first.
+    match serde_json::from_str::<Whitelists>(body) {
+        Ok(w) => Ok(w),
+        // Fall back to a full config document (back-compat).
+        Err(bare_err) => parse_config(body).map(|c| c.whitelists).map_err(|cfg_err| {
+            format!("not a whitelists object ({bare_err}) nor a valid config ({cfg_err})")
+        }),
+    }
+}
+
+/// Validate a freshly-fetched sync body and apply ONLY its `whitelists`.
+///
+/// Security model: the remote sync source is authoritative for the whitelists
+/// alone. App settings (`auth`, `host`, `port`, `geo`, `configSync`, …) always
+/// come from the local config and are never overwritten by a remote — so even a
+/// compromised sync source cannot disable auth, change the listen address, or
+/// redirect sync. The body is fully parsed/validated so malformed or malicious
+/// payloads are rejected before anything is written.
 ///
 /// The merged document (local settings + remote whitelists) is what gets
 /// persisted, keeping the on-disk file consistent with this scope across
 /// restarts.
 async fn apply_sync(state: &AppState, body: &str, path: &Path) -> Result<(), String> {
-    let remote = parse_config(body).map_err(|e| format!("invalid config: {e}"))?;
+    let remote_whitelists = parse_synced_whitelists(body)?;
 
-    // Build local-settings + remote-whitelists, validate happened above.
+    // Build local-settings + remote-whitelists.
     let mut merged = state.config.read().await.clone();
-    merged.whitelists = remote.whitelists;
+    merged.whitelists = remote_whitelists;
 
     let serialized = serde_json::to_string_pretty(&merged)
         .map_err(|e| format!("serialize merged config: {e}"))?;
@@ -307,10 +323,44 @@ mod tests {
 
         let state = state_from(&config_doc("{}"));
         let err = apply_sync(&state, "{ not valid json", &path).await.unwrap_err();
-        assert!(err.contains("invalid config"));
+        assert!(err.contains("whitelists") || err.contains("config"));
         // Nothing should have been written to disk.
         assert!(tokio::fs::read_to_string(&path).await.is_err());
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_apply_sync_accepts_bare_whitelists() {
+        // The preferred public sync source is a bare whitelists object — it must
+        // apply without carrying any app settings.
+        let dir = std::env::temp_dir().join("mirror-sync-test-bare");
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let path = dir.join(CONFIG_FILE);
+
+        let state = state_from(&config_doc("{}"));
+        let bare = r#"{ "avatar": ["karinjs", "NapNeko"], "unpkg": { "karin": ["package.json"] } }"#;
+        apply_sync(&state, bare, &path).await.unwrap();
+
+        let cfg = state.config.read().await;
+        assert_eq!(cfg.whitelists.avatar, vec!["karinjs", "NapNeko"]);
+        assert!(cfg.whitelists.unpkg.contains_key("karin"));
+        // local app settings untouched
+        assert_eq!(cfg.host, "0.0.0.0");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn test_parse_synced_whitelists_both_forms() {
+        // bare whitelists
+        let bare = parse_synced_whitelists(r#"{ "avatar": ["a"] }"#).unwrap();
+        assert_eq!(bare.avatar, vec!["a"]);
+        // full config -> extracts whitelists
+        let full = parse_synced_whitelists(&config_doc(r#"{ "avatar": ["b"] }"#)).unwrap();
+        assert_eq!(full.avatar, vec!["b"]);
+        // garbage
+        assert!(parse_synced_whitelists("not json").is_err());
+        // unknown top-level key (typo) rejected by both paths
+        assert!(parse_synced_whitelists(r#"{ "avatr": ["x"] }"#).is_err());
     }
 
     #[tokio::test]
