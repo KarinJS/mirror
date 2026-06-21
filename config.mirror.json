@@ -1,5 +1,7 @@
 {
-  "avatar": ["karinjs"],
+  "avatar": [
+    "karinjs"
+  ],
   "raw": {
     "karinjs": {
       "karin": [
@@ -12,11 +14,26 @@
   },
   "releases": {
     "NapNeko": {
-      "NapCatQQ": ["NapCat.Framework.zip"]
+      "NapCatQQ": [
+        "NapCat.Framework.zip"
+      ]
+    },
+    "icqqjs": {
+      "icqq-rust-onebot-releases": [
+        "icqq-rs-linux-arm64.tar.gz",
+        "icqq-rs-linux.tar.gz",
+        "icqq-rs-macos-x64.tar.gz",
+        "icqq-rs-macos.tar.gz",
+        "icqq-rs-windows-arm64.tar.gz",
+        "icqq-rs-windows.tar.gz"
+      ]
     }
   },
   "unpkg": {
-    "karin": ["package.json", "dist/karin.umd.js"]
+    "karin": [
+      "package.json",
+      "dist/karin.umd.js"
+    ]
   },
   "mirror": {
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json": 0
